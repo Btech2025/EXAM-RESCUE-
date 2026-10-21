@@ -1,0 +1,6 @@
+{
+  "name": "Exam Rescue — AI Exam Preparation Copilot",
+  "description": "Prioritize topics, plan study days, practice and track exam readiness.",
+  "permissions": [],
+  "capabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
