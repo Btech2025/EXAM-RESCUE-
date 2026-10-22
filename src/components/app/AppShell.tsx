@@ -116,14 +116,15 @@ function Logo({ collapsed }: { collapsed?: boolean }) {
 
 export function AppShell({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);
-  const [currentUser, setCurrentUser] = useState<UserProfile | null>(() => getCurrentUser());
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [collapsed, setCollapsed] = useState(false);
   const [mobile, setMobile] = useState(false);
-  const [theme, setThemeState] = useState<Theme>(() => getTheme());
+  const [theme, setThemeState] = useState<Theme>("light");
 
   useEffect(() => {
     loadState();
     setCurrentUser(getCurrentUser());
+    setThemeState(getTheme());
     setReady(true);
 
     const handleAuthChange = (e: Event) => {

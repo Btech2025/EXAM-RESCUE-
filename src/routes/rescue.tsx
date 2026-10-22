@@ -129,8 +129,22 @@ function TopicCard({
         </div>
       </div>
       <h3 className="mt-3 text-lg font-bold text-foreground">{t.topic.name}</h3>
+      {t.topic.subtopics &&
+        t.topic.subtopics.filter((s) => s.toLowerCase() !== t.topic.name.toLowerCase()).length >
+          0 && (
+          <p className="mt-1 text-xs text-muted-foreground">
+            {t.topic.subtopics
+              .filter((s) => s.toLowerCase() !== t.topic.name.toLowerCase())
+              .join(" • ")}
+          </p>
+        )}
       <div className="mt-2 flex flex-wrap gap-1.5">
+        {t.topic.unit && <Badge tone="violet">{t.topic.unit}</Badge>}
         <StatusBadge status={t.topic.status} />
+        <PriorityBadge
+          level={t.value >= 20 ? "High" : t.value >= 13 ? "Medium" : "Low"}
+          verified={t.priorityVerified}
+        />
         <Badge>{t.topic.difficulty}</Badge>
         <Badge tone="violet">
           <Timer className="mr-1 h-3 w-3" />
@@ -470,10 +484,12 @@ function Rescue() {
                     <span className="w-5 font-mono text-muted-foreground">
                       {r.ranked.indexOf(t) + 1}
                     </span>
+                    {t.topic.unit && <Badge tone="violet">{t.topic.unit}</Badge>}
                     <span className="flex-1 truncate text-foreground">{t.topic.name}</span>
                     <Badge tone="amber">skipped</Badge>
                     <PriorityBadge
                       level={t.value >= 22 ? "High" : t.value >= 14 ? "Medium" : "Low"}
+                      verified={t.priorityVerified}
                     />
                     <span className="w-8 text-right font-mono text-muted-foreground">
                       {t.value}

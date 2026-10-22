@@ -45,21 +45,38 @@ import {
   type Paper,
   type SyllabusTopic,
 } from "@/lib/intelligence";
-import { readPdf } from "@/lib/pdf";
+import { readPdf, readSyllabusDoc } from "@/lib/pdf";
 import { searchPYQServerFn, type SearchPYQItem } from "@/lib/pyq-search";
 import type { Exam, Difficulty, Importance, Status } from "@/lib/types";
 
 function detectSubject(text: string): string {
-  const firstLines = text.split(/\r?\n/).slice(0, 8).join(" ");
-  const patterns = [
-    /(?:b\.?tech|b\.?e\.?)\s*(?:in\s+)?([a-z][a-z\s&]+?)(?:\s*(?:semester|sem|course|subject))/i,
-    /(?:subject|course|paper)\s*[:-]\s*([a-z][a-z\s&]+)/i,
-    /(?:m\.?tech|m\.?e\.?)\s*(?:in\s+)?([a-z][a-z\s&]+?)(?:\s*(?:semester|sem|course|subject))/i,
-  ];
-  for (const p of patterns) {
-    const m = firstLines.match(p);
-    if (m?.[1] && m[1].trim().length > 2 && m[1].trim().length < 60)
-      return m[1].trim().replace(/\b\w/g, (c) => c.toUpperCase());
+  const firstLines = text.split(/\r?\n/).slice(0, 12);
+  for (const rawLine of firstLines) {
+    const line = rawLine.trim();
+    if (
+      /^(?:course\s+(?:outcomes?|objectives?|details?|code|credits?)|program(?:me)?\s+outcomes?)/i.test(
+        line,
+      )
+    ) {
+      continue;
+    }
+    const m =
+      line.match(
+        /(?:course\s+(?:title|name)|subject(?:\s+title|\s+name)?|paper(?:\s+title|\s+name)?)\s*[:–-]\s*([a-z][a-z\s&/-]{2,55})/i,
+      ) ??
+      line.match(
+        /(?:b\.?tech|b\.?e\.?|m\.?tech|m\.?e\.?)\s*(?:in\s+)?([a-z][a-z\s&]+?)(?:\s*(?:semester|sem|course|subject|$))/i,
+      );
+    if (m?.[1]) {
+      const candidate = m[1].trim();
+      if (
+        candidate.length > 2 &&
+        candidate.length < 60 &&
+        !/^(?:outcomes?|objectives?|details?|code|credits?|description)\b/i.test(candidate)
+      ) {
+        return candidate.replace(/\b\w/g, (c) => c.toUpperCase());
+      }
+    }
   }
   return "";
 }
@@ -190,30 +207,35 @@ export function ExamIntelligence({ research = false }: { research?: boolean }) {
     actions.saveIntelligence(draft);
     toast.success("Syllabus and evidence saved on this device.");
   };
-  const extract = (value: string) => {
+  const extract = (value: string): Intelligence => {
     const topics = parseSyllabus(value);
     const detected = detectSubject(value);
-    const next = { ...draft, topics, subject: draft.subject || detected };
+    const next: Intelligence = { ...draft, topics, subject: draft.subject || detected };
     update(next);
     setChosen(topics.map((t) => t.name));
     setError("");
     if (detected)
       toast.success(`Subject detected: ${detected}`, { description: "Review and edit if needed." });
+    return next;
   };
   const upload = async (file: File | undefined, isPaper = false) => {
     if (!file) return;
     setBusy(true);
     setError("");
     try {
-      const value = await readPdf(file);
+      const value = isPaper ? await readPdf(file) : await readSyllabusDoc(file);
       if (isPaper) setPaper((p) => ({ ...p, title: p.title || file.name, text: value }));
       else {
         setText(value);
         extract(value);
       }
-      toast.success("PDF text extracted. Review it before saving.");
+      toast.success("Document text extracted. Review detected units and topics before saving.");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Cannot read this PDF. Paste text instead.");
+      if (!isPaper) {
+        update({ ...draft, topics: [] });
+        setChosen([]);
+      }
+      setError(e instanceof Error ? e.message : "Cannot read this document. Paste text instead.");
     } finally {
       setBusy(false);
     }
@@ -252,7 +274,7 @@ export function ExamIntelligence({ research = false }: { research?: boolean }) {
       return;
     }
     const topics = rankings.filter((r) => selection.includes(r.topic.id)).map((r) => r.topic);
-    const merged = mergeSyllabus(exam, topics);
+    const merged = mergeSyllabus({ ...exam, topics: [] }, topics);
     if (rescue) actions.saveExam(merged);
     else actions.sendStrategy(merged, preparationStrategy(draft, s, exam, selection).days);
     actions.saveIntelligence({ ...draft, examId: merged.id });
@@ -319,20 +341,20 @@ export function ExamIntelligence({ research = false }: { research?: boolean }) {
         </div>
       )}
 
-      {/* Upload / paste section — first thing students see */}
+      {/* Upload PDF or Word doc / paste syllabus text section */}
       {!research && (
         <section className="space-y-4">
           <Panel>
             <SectionHeader
               icon={<Upload className="h-5 w-5" />}
-              title="Upload your study material"
-              sub="Drop a syllabus PDF or paste text directly. We'll extract units and topics for you to review."
+              title="Upload your syllabus (PDF or Word document)"
+              sub="Drop a .pdf, .docx, .doc, or .txt syllabus file, or paste your syllabus text directly below."
             />
             <DropZone
               icon={<Upload className="h-5 w-5" />}
-              title="Choose a syllabus PDF"
-              hint="PDF only, up to 20 MB. Private on this device — originals are never uploaded."
-              accept="application/pdf"
+              title="Choose a syllabus file (.pdf / .docx / .doc / .txt)"
+              hint="PDF (.pdf), Word (.docx, .doc, .rtf), or plain text (.txt) files. Extracted privately on this device."
+              accept=".pdf,.docx,.doc,.rtf,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword,text/plain"
               busy={busy}
               onFile={(f) => void upload(f)}
             />
@@ -341,28 +363,35 @@ export function ExamIntelligence({ research = false }: { research?: boolean }) {
           <Panel>
             <SectionHeader
               icon={<FileSearch className="h-5 w-5" />}
-              title="Or paste syllabus text"
-              sub="Skip the upload — paste text and we'll extract topics instantly."
+              title="Paste syllabus text (Units I–IV)"
+              sub="Paste your syllabus text directly below and click Save Syllabus to extract units and topics."
               tone="muted"
             />
             <textarea
-              className={`${inputCls} h-40 py-3`}
+              className={`${inputCls} h-44 py-3 font-mono text-xs leading-relaxed`}
               value={text}
               onChange={(e) => setText(e.target.value)}
-              placeholder="Unit 1: Foundations&#10;Arrays: traversal, insertion, deletion&#10;Unit 2: Trees&#10;Binary search trees"
+              placeholder={`UNIT I: Foundations\nArrays: traversal, insertion, deletion\n\nUNIT II: Trees\nBinary search trees, AVL trees\n\nUNIT III: Graphs\nBFS, DFS, Shortest paths\n\nUNIT IV: Hashing & Sorting\nHash tables, QuickSort, MergeSort`}
             />
             <div className="mt-4 flex flex-wrap gap-2">
               <Button
+                variant="signal"
                 disabled={busy}
                 onClick={() => {
                   try {
-                    extract(text);
+                    const next = extract(text);
+                    actions.saveIntelligence(next);
+                    toast.success(
+                      "Syllabus extracted! Please verify detected units and topics below.",
+                    );
                   } catch (e) {
+                    update({ ...draft, topics: [] });
+                    setChosen([]);
                     setError(e instanceof Error ? e.message : "Cannot extract topics.");
                   }
                 }}
               >
-                {busy ? "Reading PDF…" : "Extract topics"}
+                {busy ? "Reading document…" : "Save Syllabus"}
               </Button>
               <Button
                 variant="outline"
@@ -940,7 +969,7 @@ export function ExamIntelligence({ research = false }: { research?: boolean }) {
                   </span>
                 </div>
                 <div className="flex gap-2">
-                  <PriorityBadge level={r.level} />
+                  <PriorityBadge level={r.level} verified={r.priorityVerified} />
                   {r.provisional && <Badge tone="amber">Provisional</Badge>}
                 </div>
               </div>

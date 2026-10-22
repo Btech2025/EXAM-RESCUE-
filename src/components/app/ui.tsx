@@ -85,11 +85,20 @@ export function Badge({
     </span>
   );
 }
-export const PriorityBadge = ({ level }: { level: PriorityLevel }) => (
-  <Badge tone={level === "High" ? "red" : level === "Medium" ? "amber" : "muted"}>
-    {level === "High" ? "High Priority" : level === "Medium" ? "Medium Priority" : "Quick Revision"}
-  </Badge>
-);
+export const PriorityBadge = ({
+  level,
+  verified = true,
+}: {
+  level: PriorityLevel;
+  verified?: boolean | undefined;
+}) =>
+  verified === false ? (
+    <Badge tone="muted">Priority not verified</Badge>
+  ) : (
+    <Badge tone={level === "High" ? "red" : level === "Medium" ? "amber" : "muted"}>
+      {level === "High" ? "High Priority" : level === "Medium" ? "Medium Priority" : "Low Priority"}
+    </Badge>
+  );
 export const StatusBadge = ({ status }: { status: Status }) => (
   <Badge tone={status === "Revised" ? "lime" : status === "Learning" ? "violet" : "muted"}>
     {status}

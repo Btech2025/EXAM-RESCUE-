@@ -63,8 +63,9 @@ import {
   extractSyllabusUnits,
   buildTopicsFromSelectedUnits,
   type ParsedUnit,
+  type SyllabusTopic,
 } from "@/lib/intelligence";
-import { readPdf } from "@/lib/pdf";
+import { readSyllabusDoc } from "@/lib/pdf";
 import { actions, useAppState } from "@/lib/store";
 import type { Exam, Topic } from "@/lib/types";
 import { playCelebrationChime, playPopChime } from "@/lib/mascot-sound";
@@ -252,6 +253,7 @@ export function Overview() {
   const [newSubManualText, setNewSubManualText] = useState("");
   const [editingModalUnitId, setEditingModalUnitId] = useState<string | null>(null);
   const [modalUnitTitleInput, setModalUnitTitleInput] = useState("");
+  const [modalUnitTopicsInput, setModalUnitTopicsInput] = useState("");
 
   // Sync edit fields when an exam is opened for editing
   useEffect(() => {
@@ -368,32 +370,30 @@ export function Overview() {
     setEditingExam(null);
   };
 
-  // Handle uploading PDF in Add Subject modal
-  const handleNewPdfUpload = async (file: File) => {
+  // Handle uploading Word doc (.docx/.doc/.txt) in Add Subject modal
+  const handleNewDocUpload = async (file: File) => {
     setIsExtractingNewPdf(true);
-    setNewSubExtractStage("Reading syllabus PDF...");
+    setNewSubExtractStage("Reading syllabus document...");
     setNewSubPdfError("");
-    setNewSubUnits([]); // Clear stale extracted units immediately
     playPopChime(true);
     try {
-      const text = await readPdf(file, (stage) => {
+      const text = await readSyllabusDoc(file, (stage) => {
         setNewSubExtractStage(stage);
       });
       const units = extractSyllabusUnits(text, newSubName || "New Subject", newSubUnitCount);
       setNewSubPdfName(file.name);
       setNewSubPdfText(text);
+      setNewSubManualText(text);
       setNewSubUnits(units);
       setNewSubUnitCount(units.filter((u) => u.selectedForExam).length);
       toast.success(`Extracted ${units.length} units from ${file.name}`);
       playCelebrationChime();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Failed to read PDF.";
-      console.error("[Add Subject Modal PDF Error]", err);
+      const msg = err instanceof Error ? err.message : "Failed to read document.";
       setNewSubPdfError(msg);
       setNewSubPdfName("");
-      setNewSubPdfText("");
       setNewSubUnits([]);
-      toast.error("Could not extract syllabus from PDF", { description: msg });
+      toast.error("Could not extract syllabus from document", { description: msg });
     } finally {
       setIsExtractingNewPdf(false);
       setNewSubExtractStage("");
@@ -402,7 +402,9 @@ export function Overview() {
 
   const handleNewManualSyllabus = () => {
     if (!newSubManualText.trim()) {
-      setNewSubPdfError("Please enter your syllabus text or unit headings.");
+      setNewSubPdfError("Please paste your syllabus text containing Units I–IV.");
+      setNewSubUnits([]);
+      toast.error("Please paste your syllabus text first.");
       return;
     }
     try {
@@ -411,17 +413,18 @@ export function Overview() {
         newSubName || "New Subject",
         newSubUnitCount,
       );
-      setNewSubPdfName("Manual Syllabus Entry");
+      setNewSubPdfName(newSubPdfName || "Pasted Syllabus");
       setNewSubPdfText(newSubManualText);
       setNewSubUnits(units);
       setNewSubUnitCount(units.filter((u) => u.selectedForExam).length);
       setNewSubPdfError("");
       setNewSubShowManual(false);
-      toast.success(`Extracted ${units.length} units from your syllabus text!`);
+      toast.success(`Saved syllabus with ${units.length} units!`);
       playCelebrationChime();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to parse syllabus text.";
       setNewSubPdfError(msg);
+      setNewSubUnits([]);
       toast.error("Parsing failed", { description: msg });
     }
   };
@@ -435,12 +438,31 @@ export function Overview() {
     );
   };
 
-  const handleUpdateModalUnitTitle = (unitId: string, newTitle: string) => {
+  const handleUpdateModalUnitTitle = (unitId: string, newTitle: string, newTopicsRaw?: string) => {
     setNewSubUnits((prev) =>
       prev.map((u) => {
         if (u.id !== unitId) return u;
-        let updatedTopics = u.topics;
-        if (updatedTopics.length === 0) {
+        let updatedTopics: SyllabusTopic[] = u.topics;
+        if (newTopicsRaw !== undefined) {
+          const items = newTopicsRaw
+            .split(/[\r\n,;]+/)
+            .map((item) => item.trim())
+            .filter(Boolean);
+          if (items.length > 0) {
+            updatedTopics = items.map((item, idx) => ({
+              id: u.topics[idx]?.id || `unit-${u.unitNumber}-topic-${idx + 1}-${uid()}`,
+              name: item,
+              unit: u.unitLabel,
+              unitNumber: u.unitNumber,
+              subtopics: [item],
+              marks: u.topics[idx]?.marks || "",
+              objectives: u.topics[idx]?.objectives || "",
+              difficulty: u.topics[idx]?.difficulty || "Medium",
+              importance: u.topics[idx]?.importance || "High",
+              status: u.topics[idx]?.status || "Not Started",
+            }));
+          }
+        } else if (updatedTopics.length === 0) {
           updatedTopics = [
             {
               id: `unit-${u.unitNumber}-topic-1-${uid()}`,
@@ -461,7 +483,10 @@ export function Overview() {
           );
         }
         const remainingNotes = u.flaggedNotes?.filter(
-          (n) => !n.includes("was not detected") && !n.includes("Missing in scan"),
+          (n) =>
+            !n.includes("was not detected") &&
+            !n.includes("Missing in") &&
+            !n.includes("No topics were identified"),
         );
         return {
           ...u,
@@ -481,7 +506,7 @@ export function Overview() {
     }
     if (newSubUnits.length === 0) {
       toast.error(
-        "Please upload a syllabus PDF or enter syllabus topics before adding this subject.",
+        "Please paste your syllabus text (or upload a .docx/.doc file) and click Save Syllabus before adding this subject.",
       );
       return;
     }
@@ -547,6 +572,7 @@ export function Overview() {
   const top = rankedTopics(
     selectedSubjectId === "all" ? s.exams : s.exams.filter((e) => e.id === selectedSubjectId),
     today,
+    s.intelligence?.papers,
   )
     .filter((x) => x.topic.status !== "Revised")
     .slice(0, 3);
@@ -1059,7 +1085,7 @@ export function Overview() {
                     {exam.subject} · {topic.unit ? `${topic.unit} · ` : ""}~{fmtMin(minutes)}
                   </div>
                   <div className="mt-1.5">
-                    <PriorityBadge level={info.level} />
+                    <PriorityBadge level={info.level} verified={info.verified} />
                   </div>
                 </div>
               </div>
@@ -1267,105 +1293,67 @@ export function Overview() {
             </div>
           </div>
 
-          {/* Upload Syllabus PDF / Manual Entry */}
+          {/* Paste Syllabus Text or Upload PDF / Word Doc (.pdf/.docx/.doc/.txt) */}
           <div>
-            <div className="flex items-center justify-between mb-1">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
               <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">
-                Upload Syllabus PDF
+                Syllabus Content (Units I–IV)
               </label>
-              <button
-                type="button"
-                onClick={() => setNewSubShowManual((prev) => !prev)}
-                className="text-[11px] text-primary hover:underline font-semibold flex items-center gap-1"
-              >
-                <FileEdit className="h-3 w-3" />
-                <span>{newSubShowManual ? "Hide manual entry" : "Or paste syllabus text"}</span>
-              </button>
+              <label className="relative inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-primary/30 bg-primary/10 hover:bg-primary/20 text-[11px] font-semibold text-primary cursor-pointer transition">
+                <input
+                  type="file"
+                  accept=".pdf,.docx,.doc,.rtf,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword,text/plain"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) void handleNewDocUpload(f);
+                    e.target.value = "";
+                  }}
+                  className="sr-only"
+                />
+                {isExtractingNewPdf ? (
+                  <>
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    <span>{newSubExtractStage || "Reading doc..."}</span>
+                  </>
+                ) : (
+                  <>
+                    <Upload className="h-3 w-3" />
+                    <span>
+                      {newSubPdfName && newSubPdfName !== "Pasted Syllabus"
+                        ? `Loaded: ${newSubPdfName}`
+                        : "Upload Syllabus (PDF or Word)"}
+                    </span>
+                  </>
+                )}
+              </label>
             </div>
 
-            <div className="relative rounded-xl border-2 border-dashed border-primary/30 bg-primary/[0.04] p-3 text-center transition hover:border-primary/60">
-              <input
-                type="file"
-                accept=".pdf"
-                onChange={(e) => {
-                  const f = e.target.files?.[0];
-                  if (f) handleNewPdfUpload(f);
-                }}
-                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-              />
-              {isExtractingNewPdf ? (
-                <div className="flex items-center justify-center gap-2 text-primary text-xs py-1">
-                  <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                  <span>{newSubExtractStage || "Extracting syllabus units..."}</span>
-                </div>
-              ) : newSubPdfName ? (
-                <div className="flex items-center justify-between text-left text-xs">
-                  <div className="flex items-center gap-2">
-                    <CheckCircle2 className="h-4 w-4 text-emerald-500 shrink-0" />
-                    <div>
-                      <span className="font-bold text-foreground truncate block">
-                        {newSubPdfName}
-                      </span>
-                      <span className="text-[10px] text-muted-foreground">
-                        {newSubUnits.length} units extracted (
-                        {newSubUnits.filter((u) => u.selectedForExam).length} selected)
-                      </span>
-                    </div>
-                  </div>
-                  <span className="text-primary underline text-[11px] font-medium shrink-0">
-                    Replace PDF
-                  </span>
-                </div>
-              ) : (
-                <div className="flex flex-col items-center justify-center py-1 text-xs">
-                  <Upload className="h-4 w-4 text-primary mb-1" />
-                  <span className="text-foreground font-medium">Click or drop syllabus PDF</span>
-                  <span className="text-[10px] text-muted-foreground">Text-based PDF files</span>
-                </div>
-              )}
+            <textarea
+              rows={6}
+              value={newSubManualText}
+              onChange={(e) => setNewSubManualText(e.target.value)}
+              placeholder={`UNIT I: Process Management\nProcess scheduling, Deadlocks, Threads\n\nUNIT II: Memory Management\nPaging, Virtual memory, Segmentation\n\nUNIT III: Storage & File Systems\nFile system structure, Disk scheduling\n\nUNIT IV: Distributed Systems\nConsensus protocols, Fault tolerance`}
+              className="w-full rounded-xl border border-input bg-background p-2.5 text-xs text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none font-mono leading-relaxed"
+            />
+
+            <div className="mt-2 flex items-center justify-between gap-2">
+              <span className="text-[11px] text-muted-foreground">
+                {newSubUnits.length > 0
+                  ? `Saved ${newSubUnits.length} units (${newSubUnits.filter((u) => u.selectedForExam).length} selected)`
+                  : "Paste syllabus text or upload a Word doc, then click Save Syllabus"}
+              </span>
+              <Button variant="signal" size="sm" onClick={handleNewManualSyllabus}>
+                <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
+                Save Syllabus
+              </Button>
             </div>
 
-            {/* PDF Error Display */}
+            {/* Error Display */}
             {newSubPdfError && (
               <div className="mt-2 rounded-xl border border-rose-500/30 bg-rose-500/10 p-2.5 text-xs text-rose-600 dark:text-rose-300 flex items-start gap-2">
                 <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
                 <div className="flex-1">
                   <p className="font-semibold">{newSubPdfError}</p>
-                  {!newSubShowManual && (
-                    <button
-                      type="button"
-                      onClick={() => setNewSubShowManual(true)}
-                      className="mt-1 inline-flex items-center gap-1 font-bold underline hover:opacity-85 text-[11px]"
-                    >
-                      <FileEdit className="h-3 w-3" />
-                      <span>Paste syllabus text manually instead</span>
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {/* Manual Text Drawer */}
-            {newSubShowManual && (
-              <div className="mt-2 rounded-xl border border-primary/30 bg-card p-3 shadow-sm">
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-xs font-bold text-foreground">Paste Syllabus Text</span>
-                  <span className="text-[10px] text-muted-foreground">Unit headings & topics</span>
-                </div>
-                <textarea
-                  rows={4}
-                  value={newSubManualText}
-                  onChange={(e) => setNewSubManualText(e.target.value)}
-                  placeholder={`UNIT 1: Process Management\nProcess scheduling, Deadlocks, Threads\n\nUNIT 2: Memory Management\nPaging, Virtual memory, Segmentation`}
-                  className="w-full rounded-lg border border-input bg-background p-2 text-xs text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
-                />
-                <div className="mt-2 flex justify-end gap-2">
-                  <Button variant="ghost" size="sm" onClick={() => setNewSubShowManual(false)}>
-                    Cancel
-                  </Button>
-                  <Button variant="signal" size="sm" onClick={handleNewManualSyllabus}>
-                    Extract Units
-                  </Button>
                 </div>
               </div>
             )}
@@ -1375,7 +1363,7 @@ export function Overview() {
           <div>
             <div className="flex items-center justify-between mb-1.5">
               <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">
-                Confirm Units Appearing On Exam
+                Review, Edit &amp; Confirm Units
               </label>
               {newSubUnits.length > 0 && (
                 <span className="text-[11px] font-semibold text-primary">
@@ -1388,121 +1376,160 @@ export function Overview() {
             {newSubUnits.length === 0 ? (
               <div className="rounded-xl border border-dashed border-border/80 bg-surface/40 p-4 text-center">
                 <p className="text-xs text-muted-foreground">
-                  Upload a syllabus PDF or paste text above to extract and confirm your exam units.
+                  Paste your syllabus text above (or upload a .docx/.doc file) and click{" "}
+                  <span className="font-semibold text-foreground">Save Syllabus</span> to confirm
+                  your exam units.
                 </p>
               </div>
             ) : (
-              <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1">
-                {newSubUnits.map((unit) => (
-                  <div
-                    key={unit.id}
-                    onClick={() => toggleNewSubUnit(unit.unitNumber)}
-                    className={cn(
-                      "cursor-pointer flex flex-col gap-1.5 p-2 rounded-lg border text-xs transition",
-                      unit.selectedForExam
-                        ? "bg-primary/10 border-primary/40 text-foreground"
-                        : "bg-surface/40 border-border/40 text-muted-foreground",
-                    )}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      {editingModalUnitId === unit.id ? (
-                        <div
-                          className="flex items-center gap-1.5 flex-1 min-w-0"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <span className="font-bold text-primary shrink-0">{unit.unitLabel}:</span>
-                          <input
-                            type="text"
-                            value={modalUnitTitleInput}
-                            onChange={(e) => setModalUnitTitleInput(e.target.value)}
-                            className="flex-1 rounded border border-primary/50 bg-background px-1.5 py-0.5 text-xs text-foreground focus:outline-none"
-                            autoFocus
-                          />
-                          <button
-                            type="button"
-                            onClick={() => {
-                              handleUpdateModalUnitTitle(
-                                unit.id,
-                                modalUnitTitleInput.trim() || unit.title,
-                              );
-                              setEditingModalUnitId(null);
-                              playPopChime(true);
-                              toast.success("Unit updated");
-                            }}
-                            className="rounded bg-primary px-2 py-0.5 text-[10px] font-bold text-primary-foreground"
-                          >
-                            Save
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setEditingModalUnitId(null)}
-                            className="text-[10px] text-muted-foreground hover:text-foreground px-1"
-                          >
-                            ✕
-                          </button>
-                        </div>
-                      ) : (
-                        <div className="flex items-center gap-2 min-w-0 flex-1">
+              <div className="max-h-56 overflow-y-auto space-y-1.5 pr-1">
+                {newSubUnits.map((unit) => {
+                  const allTopicLabels = unit.topics.flatMap((t) =>
+                    t.subtopics && t.subtopics.length > 1 ? t.subtopics : [t.name],
+                  );
+                  return (
+                    <div
+                      key={unit.id}
+                      onClick={() => toggleNewSubUnit(unit.unitNumber)}
+                      className={cn(
+                        "cursor-pointer flex flex-col gap-1.5 p-2.5 rounded-lg border text-xs transition",
+                        unit.selectedForExam
+                          ? "bg-primary/10 border-primary/40 text-foreground"
+                          : "bg-surface/40 border-border/40 text-muted-foreground",
+                      )}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        {editingModalUnitId === unit.id ? (
                           <div
-                            className={cn(
-                              "flex h-4 w-4 shrink-0 items-center justify-center rounded border",
-                              unit.selectedForExam
-                                ? "bg-primary border-primary text-primary-foreground"
-                                : "border-input bg-card",
-                            )}
+                            className="flex-1 space-y-1.5 min-w-0"
+                            onClick={(e) => e.stopPropagation()}
                           >
-                            {unit.selectedForExam && <Check className="h-3 w-3 stroke-[3]" />}
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-bold text-primary shrink-0">
+                                {unit.unitLabel}:
+                              </span>
+                              <input
+                                type="text"
+                                value={modalUnitTitleInput}
+                                onChange={(e) => setModalUnitTitleInput(e.target.value)}
+                                className="flex-1 rounded border border-primary/50 bg-background px-1.5 py-0.5 text-xs text-foreground focus:outline-none"
+                                autoFocus
+                              />
+                            </div>
+                            <textarea
+                              rows={2}
+                              value={modalUnitTopicsInput}
+                              onChange={(e) => setModalUnitTopicsInput(e.target.value)}
+                              placeholder="Topic 1, Topic 2, Topic 3"
+                              className="w-full rounded border border-primary/50 bg-background p-1.5 text-xs text-foreground focus:outline-none"
+                            />
+                            <div className="flex justify-end gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => setEditingModalUnitId(null)}
+                                className="text-[10px] text-muted-foreground hover:text-foreground px-1.5"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  handleUpdateModalUnitTitle(
+                                    unit.id,
+                                    modalUnitTitleInput.trim() || unit.title,
+                                    modalUnitTopicsInput,
+                                  );
+                                  setEditingModalUnitId(null);
+                                  playPopChime(true);
+                                  toast.success("Unit updated");
+                                }}
+                                className="rounded bg-primary px-2 py-0.5 text-[10px] font-bold text-primary-foreground"
+                              >
+                                Save Unit
+                              </button>
+                            </div>
                           </div>
-                          <span className="font-bold text-primary shrink-0">{unit.unitLabel}:</span>
-                          <span className="truncate flex-1 font-medium">{unit.title}</span>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setEditingModalUnitId(unit.id);
-                              setModalUnitTitleInput(unit.title);
-                            }}
-                            className="shrink-0 p-0.5 rounded hover:bg-primary/20 text-muted-foreground hover:text-primary transition"
-                            title="Edit unit title"
-                          >
-                            <Pencil className="h-3 w-3" />
-                          </button>
+                        ) : (
+                          <div className="flex items-center gap-2 min-w-0 flex-1">
+                            <div
+                              className={cn(
+                                "flex h-4 w-4 shrink-0 items-center justify-center rounded border",
+                                unit.selectedForExam
+                                  ? "bg-primary border-primary text-primary-foreground"
+                                  : "border-input bg-card",
+                              )}
+                            >
+                              {unit.selectedForExam && <Check className="h-3 w-3 stroke-[3]" />}
+                            </div>
+                            <span className="font-bold text-primary shrink-0">
+                              {unit.unitLabel}:
+                            </span>
+                            <span className="truncate flex-1 font-medium">{unit.title}</span>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setEditingModalUnitId(unit.id);
+                                setModalUnitTitleInput(unit.title);
+                                setModalUnitTopicsInput(allTopicLabels.join(", "));
+                              }}
+                              className="shrink-0 p-0.5 rounded hover:bg-primary/20 text-muted-foreground hover:text-primary transition"
+                              title="Edit unit title and topics"
+                            >
+                              <Pencil className="h-3 w-3" />
+                            </button>
+                          </div>
+                        )}
+
+                        <span
+                          className={cn(
+                            "text-[9px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider shrink-0",
+                            unit.selectedForExam
+                              ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+                              : "bg-muted text-muted-foreground",
+                          )}
+                        >
+                          {unit.selectedForExam ? "On Exam" : "Excluded"}
+                        </span>
+                      </div>
+
+                      {/* Topics list */}
+                      {editingModalUnitId !== unit.id && (
+                        <div className="pl-6">
+                          {unit.topics.length === 0 ? (
+                            <span className="text-[10px] font-semibold text-amber-600 dark:text-amber-400">
+                              ⚠️ Missing topics — click edit pencil to add topics
+                            </span>
+                          ) : (
+                            <p className="text-[11px] text-muted-foreground leading-relaxed">
+                              {allTopicLabels.join(" • ")}
+                            </p>
+                          )}
                         </div>
                       )}
 
-                      <span
-                        className={cn(
-                          "text-[9px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider shrink-0",
-                          unit.selectedForExam
-                            ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
-                            : "bg-muted text-muted-foreground",
-                        )}
-                      >
-                        {unit.selectedForExam ? "On Exam" : "Excluded"}
-                      </span>
+                      {/* Course Outcomes & Flags */}
+                      {(unit.courseOutcomes || unit.flaggedNotes) && (
+                        <div className="pl-6 flex flex-wrap items-center gap-1.5">
+                          {unit.courseOutcomes?.map((co) => (
+                            <span
+                              key={co}
+                              className="inline-flex items-center text-[9px] font-bold px-1 py-0.2 rounded bg-sky-500/15 text-sky-700 dark:text-sky-300 border border-sky-500/25"
+                            >
+                              🎯 {co}
+                            </span>
+                          ))}
+                          {unit.flaggedNotes && (
+                            <span className="inline-flex items-center gap-0.5 text-[9px] text-amber-700 dark:text-amber-300 bg-amber-500/10 px-1 py-0.2 rounded border border-amber-500/20">
+                              <AlertTriangle className="h-2.5 w-2.5" />
+                              <span>{unit.flaggedNotes[0]}</span>
+                            </span>
+                          )}
+                        </div>
+                      )}
                     </div>
-
-                    {/* Course Outcomes & Scan Alerts */}
-                    {(unit.courseOutcomes || unit.flaggedNotes) && (
-                      <div className="pl-6 flex flex-wrap items-center gap-1.5">
-                        {unit.courseOutcomes?.map((co) => (
-                          <span
-                            key={co}
-                            className="inline-flex items-center text-[9px] font-bold px-1 py-0.2 rounded bg-sky-500/15 text-sky-700 dark:text-sky-300 border border-sky-500/25"
-                          >
-                            🎯 {co}
-                          </span>
-                        ))}
-                        {unit.flaggedNotes && (
-                          <span className="inline-flex items-center gap-0.5 text-[9px] text-amber-700 dark:text-amber-300 bg-amber-500/10 px-1 py-0.2 rounded border border-amber-500/20">
-                            <AlertTriangle className="h-2.5 w-2.5" />
-                            <span>Scan noise flagged</span>
-                          </span>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

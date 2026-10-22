@@ -310,3 +310,338 @@ export function normalizeOcrSyllabusText(text: string): string {
       .replace(/^[|\][}I!]\s*(UNIT|MODULE|CHAPTER|COURSE OUTCOME)/gim, "$1")
   );
 }
+
+function decodeXmlEntities(xml: string): string {
+  return xml
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(Number(dec)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+}
+
+function extractTextFromWordXml(xml: string): string {
+  const withBreaks = xml
+    .replace(/<\/w:p>\s*<\/w:tc>/gi, "  ")
+    .replace(/<\/w:p>/gi, "\n")
+    .replace(/<\/w:tr>/gi, "\n")
+    .replace(/<w:br\b[^>]*\/?>/gi, "\n")
+    .replace(/<w:cr\b[^>]*\/?>/gi, "\n")
+    .replace(/<\/w:tc>/gi, "  ")
+    .replace(/<w:tab\b[^>]*\/?>/gi, "  ");
+
+  const stripped = withBreaks.replace(/<[^>]+>/g, "");
+  return decodeXmlEntities(stripped)
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+async function inflateRawBytes(compressed: Uint8Array): Promise<Uint8Array> {
+  if (typeof DecompressionStream === "undefined") {
+    throw new Error("Browser does not support DecompressionStream for .docx extraction.");
+  }
+  const ds = new DecompressionStream("deflate-raw");
+  const writer = ds.writable.getWriter();
+  void writer.write(new Uint8Array(compressed));
+  void writer.close();
+
+  const reader = ds.readable.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalLen = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) {
+      chunks.push(value);
+      totalLen += value.byteLength;
+    }
+  }
+
+  const out = new Uint8Array(totalLen);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
+async function extractDocxXmlFromZip(buffer: ArrayBuffer): Promise<string> {
+  const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer);
+  const decoder = new TextDecoder("utf-8", { fatal: false });
+
+  // 1. Try Central Directory first (handles data descriptors where local header compressedSize is 0)
+  for (let i = 0; i <= bytes.length - 46; i++) {
+    if (view.getUint32(i, true) === 0x02014b50) {
+      const compressionMethod = view.getUint16(i + 10, true);
+      const compressedSize = view.getUint32(i + 20, true);
+      const fileNameLength = view.getUint16(i + 28, true);
+      const extraLength = view.getUint16(i + 30, true);
+      const commentLength = view.getUint16(i + 32, true);
+      const localHeaderOffset = view.getUint32(i + 42, true);
+
+      const fileName = decoder.decode(bytes.subarray(i + 46, i + 46 + fileNameLength));
+      if (fileName === "word/document.xml" && localHeaderOffset + 30 <= bytes.length) {
+        const localNameLen = view.getUint16(localHeaderOffset + 26, true);
+        const localExtraLen = view.getUint16(localHeaderOffset + 28, true);
+        const dataStart = localHeaderOffset + 30 + localNameLen + localExtraLen;
+        const compressedData = bytes.subarray(dataStart, dataStart + compressedSize);
+
+        if (compressionMethod === 0) {
+          return decoder.decode(compressedData);
+        } else if (compressionMethod === 8) {
+          const decompressed = await inflateRawBytes(compressedData);
+          return decoder.decode(decompressed);
+        }
+      }
+
+      i += 45 + fileNameLength + extraLength + commentLength;
+    }
+  }
+
+  // 2. Fallback: scan Local File Headers directly
+  for (let i = 0; i <= bytes.length - 30; i++) {
+    if (view.getUint32(i, true) === 0x04034b50) {
+      const compressionMethod = view.getUint16(i + 8, true);
+      const compressedSize = view.getUint32(i + 18, true);
+      const fileNameLength = view.getUint16(i + 26, true);
+      const extraLength = view.getUint16(i + 28, true);
+      const fileName = decoder.decode(bytes.subarray(i + 30, i + 30 + fileNameLength));
+      const dataStart = i + 30 + fileNameLength + extraLength;
+
+      if (fileName === "word/document.xml" && compressedSize > 0) {
+        const compressedData = bytes.subarray(dataStart, dataStart + compressedSize);
+        if (compressionMethod === 0) {
+          return decoder.decode(compressedData);
+        } else if (compressionMethod === 8) {
+          const decompressed = await inflateRawBytes(compressedData);
+          return decoder.decode(decompressed);
+        }
+      }
+    }
+  }
+
+  throw new Error(
+    "Could not locate word/document.xml inside this .docx file. Please verify the file or paste the syllabus text directly.",
+  );
+}
+
+function extractTextFromLegacyBinaryDoc(bytes: Uint8Array): string {
+  const ignoreMetadata =
+    /^(?:Root Entry|WordDocument|1Table|0Table|Data|SummaryInformation|DocumentSummaryInformation|CompObj|Microsoft Word|MSWordDoc|Word\.Document\.\d+|Normal\.dotm?|Default Paragraph Font|Times New Roman|Calibri|Arial|Cambria|Symbol|Wingdings|_PID_HLINKS|Hyperlink|Title|Subject|Author|Keywords|Comments|Template|LastAuthor)$/i;
+
+  const chunks: string[] = [];
+
+  // Extract UTF-16LE runs
+  let currentUtf16 = "";
+  for (let i = 0; i + 1 < bytes.length; i += 2) {
+    const code = bytes[i]! | (bytes[i + 1]! << 8);
+    if (
+      code === 0x000d ||
+      code === 0x000a ||
+      code === 0x0009 ||
+      (code >= 0x0020 && code <= 0x007e) ||
+      (code >= 0x2010 && code <= 0x2027)
+    ) {
+      currentUtf16 += code === 0x000d ? "\n" : String.fromCharCode(code);
+    } else {
+      if (currentUtf16.trim().length >= 12) {
+        chunks.push(currentUtf16.trim());
+      }
+      currentUtf16 = "";
+    }
+  }
+  if (currentUtf16.trim().length >= 12) {
+    chunks.push(currentUtf16.trim());
+  }
+
+  // Extract ASCII runs
+  let currentAscii = "";
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i]!;
+    if (b === 0x0d || b === 0x0a || b === 0x09 || (b >= 0x20 && b <= 0x7e)) {
+      currentAscii += b === 0x0d ? "\n" : String.fromCharCode(b);
+    } else {
+      if (currentAscii.trim().length >= 12) {
+        chunks.push(currentAscii.trim());
+      }
+      currentAscii = "";
+    }
+  }
+  if (currentAscii.trim().length >= 12) {
+    chunks.push(currentAscii.trim());
+  }
+
+  const lines = chunks
+    .flatMap((c) => c.split(/\r?\n/))
+    .map((l) => l.replace(/\s+/g, " ").trim())
+    .filter((l) => l.length >= 3 && !ignoreMetadata.test(l) && /[a-zA-Z]{3,}/.test(l));
+
+  return [...new Set(lines)].join("\n");
+}
+
+function extractTextFromRtf(rtf: string): string {
+  return rtf
+    .replace(/\{\\\*[^{}]*\}/g, "")
+    .replace(/\\(?:par|line|row)\b\s*/gi, "\n")
+    .replace(/\\(?:tab|cell)\b\s*/gi, "  ")
+    .replace(/\\'([0-9a-fA-F]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/\\[a-zA-Z]+-?\d*\s?/g, "")
+    .replace(/[{}]/g, "")
+    .split(/\r?\n/)
+    .map((l) => l.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+/**
+ * Extracts raw text from a PDF (.pdf), Word document (.docx, .doc, .rtf), or plain text (.txt) syllabus file in the browser.
+ */
+export async function readSyllabusDoc(
+  file: File,
+  onProgress?: (status: string) => void,
+): Promise<string> {
+  if (!file) {
+    throw new Error(
+      "No file provided. Please select a PDF (.pdf), Word (.docx, .doc), or text (.txt) file.",
+    );
+  }
+
+  const lowerName = file.name.toLowerCase();
+  const isPdfFile = lowerName.endsWith(".pdf") || file.type === "application/pdf";
+  if (isPdfFile) {
+    return readPdf(file, onProgress);
+  }
+
+  const isSupportedExt =
+    lowerName.endsWith(".docx") ||
+    lowerName.endsWith(".doc") ||
+    lowerName.endsWith(".txt") ||
+    lowerName.endsWith(".rtf");
+
+  if (!isSupportedExt) {
+    throw new Error(
+      `"${file.name}" is not a supported document. Please upload a PDF (.pdf) or Word (.docx, .doc, .rtf, .txt) file, or paste your syllabus text directly.`,
+    );
+  }
+
+  if (file.size === 0) {
+    throw new Error("The selected document is empty (0 bytes). Please upload a valid file.");
+  }
+
+  onProgress?.("Reading syllabus document...");
+
+  let arrayBuffer: ArrayBuffer;
+  if (typeof file.arrayBuffer === "function") {
+    arrayBuffer = await file.arrayBuffer();
+  } else {
+    arrayBuffer = await new Promise<ArrayBuffer>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as ArrayBuffer);
+      reader.onerror = () => reject(new Error("Failed to read file contents."));
+      reader.readAsArrayBuffer(file);
+    });
+  }
+
+  const bytes = new Uint8Array(arrayBuffer);
+
+  // If a PDF file was renamed with a .doc/.txt extension, detect %PDF- magic bytes
+  const isPdfMagic =
+    bytes.length >= 5 &&
+    bytes[0] === 0x25 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x44 &&
+    bytes[3] === 0x46 &&
+    bytes[4] === 0x2d;
+  if (isPdfMagic) {
+    const pdfFile = new File([arrayBuffer], `${file.name}.pdf`, { type: "application/pdf" });
+    return readPdf(pdfFile, onProgress);
+  }
+
+  // 1. Check for ZIP magic bytes (PK\x03\x04) -> .docx Office Open XML
+  const isZip =
+    bytes.length >= 4 &&
+    bytes[0] === 0x50 &&
+    bytes[1] === 0x4b &&
+    bytes[2] === 0x03 &&
+    bytes[3] === 0x04;
+
+  if (isZip || lowerName.endsWith(".docx")) {
+    if (!isZip) {
+      // Sometimes a plain text or XML file is named .docx
+      const rawText = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+      if (rawText.includes("<w:document") || rawText.includes("<w:p")) {
+        const extracted = extractTextFromWordXml(rawText);
+        if (extracted.trim()) return normalizeOcrSyllabusText(extracted);
+      }
+      if (rawText.trim() && !rawText.includes("\u0000")) {
+        return normalizeOcrSyllabusText(rawText.trim());
+      }
+      throw new Error(
+        "The selected .docx file is not a valid Word document archive. Please save as .docx or paste your syllabus text.",
+      );
+    }
+
+    onProgress?.("Extracting text from Word (.docx) document...");
+    const xml = await extractDocxXmlFromZip(arrayBuffer);
+    const text = extractTextFromWordXml(xml);
+    if (!text.trim()) {
+      throw new Error(
+        "No readable text found inside this .docx file. Please paste your syllabus text directly.",
+      );
+    }
+    return normalizeOcrSyllabusText(text);
+  }
+
+  // 2. Check for OLE2 Compound Document magic bytes (0xD0 0xCF 0x11 0xE0) -> legacy binary .doc
+  const isOle2 =
+    bytes.length >= 4 &&
+    bytes[0] === 0xd0 &&
+    bytes[1] === 0xcf &&
+    bytes[2] === 0x11 &&
+    bytes[3] === 0xe0;
+
+  if (isOle2) {
+    onProgress?.("Extracting text from legacy Word (.doc) document...");
+    const text = extractTextFromLegacyBinaryDoc(bytes);
+    if (!text.trim()) {
+      throw new Error(
+        "Could not extract readable text from this legacy binary .doc file. Please save it as .docx or paste the syllabus text directly.",
+      );
+    }
+    return normalizeOcrSyllabusText(text);
+  }
+
+  // 3. Plain text, RTF, or XML/HTML saved with .doc/.rtf/.txt extension
+  const rawString = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  if (rawString.trimStart().startsWith("{\\rtf") || lowerName.endsWith(".rtf")) {
+    const rtfText = extractTextFromRtf(rawString);
+    if (!rtfText.trim()) {
+      throw new Error("No readable text found in this RTF document.");
+    }
+    return normalizeOcrSyllabusText(rtfText);
+  }
+
+  if (
+    rawString.includes("<w:document") ||
+    rawString.includes("<w:p") ||
+    rawString.includes("<html") ||
+    rawString.includes("<body")
+  ) {
+    const xmlText = extractTextFromWordXml(rawString);
+    if (xmlText.trim()) return normalizeOcrSyllabusText(xmlText);
+  }
+
+  if (!rawString.trim()) {
+    throw new Error("No readable text found in the uploaded file.");
+  }
+
+  return normalizeOcrSyllabusText(rawString.trim());
+}

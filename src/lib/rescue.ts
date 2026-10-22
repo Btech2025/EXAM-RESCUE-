@@ -37,6 +37,7 @@ export interface RescueTopic {
   minutes: number; // study + practice time needed (breaks excluded)
   quiz: { correct: number; total: number } | null;
   reasons: string[];
+  priorityVerified?: boolean;
 }
 
 export interface RescueResult {
@@ -82,22 +83,29 @@ export function rescueAnalysis(
   if (!exam) return null;
 
   const acc = topicQuizAccuracy(state);
+  const papers = state.intelligence?.papers;
   const ranked: RescueTopic[] = exam.topics
     .filter((t) => {
       const quiz = acc[t.name.toLowerCase()];
       return t.status !== "Revised" || (quiz && quiz.total > 0 && quiz.correct / quiz.total < 0.8);
     })
     .map((topic) => {
-      const p = topicPriority(topic, exam, today);
+      const p = topicPriority(topic, exam, today, papers);
       const accuracy = acc[topic.name.toLowerCase()];
       const q = accuracy && accuracy.total > 0 ? accuracy : null;
       const ratio = q ? q.correct / q.total : null;
       const quizBonus = ratio === null ? 0 : ratio < 0.5 ? 6 : ratio < 0.8 ? 3 : -2;
       const study = estimateMinutes(topic);
       const reasons: string[] = [];
-      if (topic.importance === "High")
+      if (p.pyqCount > 0) {
+        reasons.push(`Verified in ${p.pyqCount} past question paper${p.pyqCount === 1 ? "" : "s"}`);
+      } else if (!p.verified) {
+        reasons.push("Priority not verified — ranked by syllabus relevance and remaining time");
+      } else if (topic.importance === "High") {
         reasons.push("High exam importance — likely to carry many marks");
-      else if (topic.importance === "Medium") reasons.push("Moderate exam weight");
+      } else if (topic.importance === "Medium") {
+        reasons.push("Moderate exam weight");
+      }
       if (q && ratio !== null && ratio < 0.5)
         reasons.push(`Weak quiz result: ${q.correct}/${q.total} correct`);
       else if (q && ratio !== null && ratio < 0.8)
@@ -117,6 +125,7 @@ export function rescueAnalysis(
         minutes: study + PRACTICE,
         quiz: q,
         reasons,
+        priorityVerified: p.verified,
       };
     })
     // Highest value first; on ties, prefer the quicker win.
@@ -155,6 +164,11 @@ export function rescueAnalysis(
     neededMin += rt.minutes + blocks * BREAK;
     let remaining = study;
     let part = 0;
+    const unitPrefix = rt.topic.unit ? `${rt.topic.unit}: ` : "";
+    const distinctSubs = (rt.topic.subtopics ?? []).filter(
+      (s) => s.trim() && s.trim().toLowerCase() !== rt.topic.name.trim().toLowerCase(),
+    );
+    const subSuffix = distinctSubs.length > 0 ? ` (${distinctSubs.join(", ")})` : "";
     while (remaining > 0 && di < days.length) {
       if (free() < 15) {
         di++;
@@ -164,7 +178,7 @@ export function rescueAnalysis(
       part++;
       push({
         kind: "focus",
-        title: `${rt.topic.status === "Not Started" ? "Learn" : "Revise"}: ${rt.topic.name}${blocks > 1 ? ` · block ${part}` : ""}`,
+        title: `${rt.topic.status === "Not Started" ? "Learn" : "Revise"}: ${unitPrefix}${rt.topic.name}${subSuffix}${blocks > 1 ? ` · block ${part}` : ""}`,
         minutes: len,
         topicId: rt.topic.id,
       });
@@ -180,7 +194,7 @@ export function rescueAnalysis(
       if (di < days.length) {
         push({
           kind: "practice",
-          title: `Quick recall: ${rt.topic.name} — 5 self-test questions`,
+          title: `Quick recall: ${unitPrefix}${rt.topic.name} — 5 self-test questions`,
           minutes: PRACTICE,
           topicId: rt.topic.id,
         });

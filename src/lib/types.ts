@@ -14,6 +14,7 @@ export interface Topic {
   subtopics?: string[];
   unitNumber?: number;
   courseOutcomes?: string[];
+  priorityVerified?: boolean;
 }
 
 export interface Exam {
@@ -40,7 +41,10 @@ export interface Task {
   kind: TaskKind;
   done: boolean;
   completedAt?: string | undefined;
-  subtopics?: string[];
+  unit?: string | undefined;
+  topicName?: string | undefined;
+  subtopics?: string[] | undefined;
+  priorityVerified?: boolean | undefined;
 }
 
 export interface Plan {

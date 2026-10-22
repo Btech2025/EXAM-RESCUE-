@@ -29,20 +29,97 @@ export interface PriorityInfo {
   score: number;
   level: PriorityLevel;
   reasons: string[];
+  verified: boolean;
+  pyqCount: number;
 }
 
-export function topicPriority(t: Topic, exam: Exam, today: string): PriorityInfo {
+const normKey = (s: string) =>
+  s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+
+export function countTopicPyqEvidence(
+  t: Topic,
+  papers?: { text: string; review: string }[],
+): { paperCount: number; repetitions: number } {
+  if (!papers?.length) return { paperCount: 0, repetitions: 0 };
+  const verifiedPapers = papers.filter((p) => p.review === "verified" && p.text.trim());
+  if (!verifiedPapers.length) return { paperCount: 0, repetitions: 0 };
+
+  const keys = [
+    normKey(t.name),
+    ...(t.subtopics ?? []).map((s) => normKey(s)).filter((k) => k.length > 3),
+  ].filter(Boolean);
+  if (!keys.length) return { paperCount: 0, repetitions: 0 };
+
+  let paperCount = 0;
+  let repetitions = 0;
+  for (const p of verifiedPapers) {
+    const hay = ` ${normKey(p.text)} `;
+    let matchedInPaper = false;
+    for (const k of keys) {
+      if (hay.includes(` ${k} `)) {
+        matchedInPaper = true;
+        const parts = hay.split(` ${k} `);
+        repetitions += Math.max(1, parts.length - 1);
+      }
+    }
+    if (matchedInPaper) paperCount++;
+  }
+  return { paperCount, repetitions };
+}
+
+export function topicPriority(
+  t: Topic,
+  exam: Exam,
+  today: string,
+  papers?: { text: string; review: string }[],
+): PriorityInfo {
   const days = Math.max(0, daysBetween(today, exam.date));
   const prox = days <= 3 ? 8 : days <= 7 ? 5 : days <= 14 ? 3 : 1;
-  const score = IMP[t.importance] + DIFF[t.difficulty] + STAT[t.status] + prox;
-  const reasons = [
-    `${t.importance} importance (+${IMP[t.importance]})`,
+  const { paperCount, repetitions } = countTopicPyqEvidence(t, papers);
+  const pyqBonus =
+    paperCount > 0
+      ? Math.min(8, paperCount * 2 + Math.min(2, Math.max(0, repetitions - paperCount)))
+      : 0;
+
+  const verified = t.priorityVerified !== false || paperCount > 0;
+  const distinctSubs = (t.subtopics ?? []).filter(
+    (s) => normKey(s) && normKey(s) !== normKey(t.name),
+  );
+  const syllabusRelevance =
+    t.priorityVerified === false && paperCount === 0
+      ? distinctSubs.length >= 3
+        ? 6
+        : distinctSubs.length >= 1
+          ? 5
+          : IMP.Medium
+      : IMP[t.importance];
+
+  const score = syllabusRelevance + DIFF[t.difficulty] + STAT[t.status] + prox + pyqBonus;
+  const reasons: string[] = [];
+
+  if (paperCount > 0) {
+    reasons.push(
+      `PYQ evidence: appeared in ${paperCount} verified paper${paperCount === 1 ? "" : "s"} (${repetitions} mention${repetitions === 1 ? "" : "s"}, +${pyqBonus})`,
+    );
+  } else if (!verified) {
+    reasons.push(
+      `Priority not verified (no PYQ or marks evidence; syllabus relevance +${syllabusRelevance})`,
+    );
+  } else {
+    reasons.push(`${t.importance} importance (+${IMP[t.importance]})`);
+  }
+
+  reasons.push(
     `${t.difficulty} difficulty (+${DIFF[t.difficulty]})`,
     `Status: ${t.status} (+${STAT[t.status]})`,
     `Exam in ${days} day${days === 1 ? "" : "s"} (+${prox})`,
-  ];
+  );
+
   const level: PriorityLevel = score >= 20 ? "High" : score >= 13 ? "Medium" : "Low";
-  return { score, level, reasons };
+  return { score, level, reasons, verified, pyqCount: paperCount };
 }
 
 export function estimateMinutes(t: Topic) {
@@ -54,13 +131,17 @@ export function estimateMinutes(t: Topic) {
 export const upcomingExams = (exams: Exam[], today: string) =>
   exams.filter((e) => e.date >= today).sort((a, b) => a.date.localeCompare(b.date));
 
-export function rankedTopics(exams: Exam[], today: string) {
+export function rankedTopics(
+  exams: Exam[],
+  today: string,
+  papers?: { text: string; review: string }[],
+) {
   return upcomingExams(exams, today)
     .flatMap((exam) =>
       exam.topics.map((topic) => ({
         exam,
         topic,
-        info: topicPriority(topic, exam, today),
+        info: topicPriority(topic, exam, today, papers),
         minutes: estimateMinutes(topic),
       })),
     )
@@ -70,20 +151,68 @@ export function rankedTopics(exams: Exam[], today: string) {
 const capacity = (exams: Exam[], day: string) =>
   Math.max(0, ...exams.filter((e) => e.date > day).map((e) => e.hoursPerDay * 60));
 
-function place(chunks: Task[], exams: Exam[], start: string, used: Record<string, number>) {
-  const deadline: Record<string, string> = Object.fromEntries(exams.map((e) => [e.id, e.date]));
+/** Interleave tasks across units within each priority tier so all syllabus units are covered evenly. */
+function interleaveByUnit(chunks: Task[], deadline: Record<string, string>): Task[] {
   const sorted = [...chunks].sort(
     (a, b) =>
       b.score - a.score || (deadline[a.examId] ?? "").localeCompare(deadline[b.examId] ?? ""),
   );
+
+  const groups = new Map<string, Task[]>();
+  const unitOrder: string[] = [];
+  for (const c of sorted) {
+    const key = `${c.examId}::${c.unit || "default"}`;
+    if (!groups.has(key)) {
+      groups.set(key, []);
+      unitOrder.push(key);
+    }
+    groups.get(key)!.push(c);
+  }
+
+  if (unitOrder.length <= 1) return sorted;
+
+  const result: Task[] = [];
+  let remaining = sorted.length;
+  while (remaining > 0) {
+    // Pick the highest-scoring next task across available units in round-robin order
+    let addedInPass = false;
+    for (const key of unitOrder) {
+      const queue = groups.get(key)!;
+      if (queue.length > 0) {
+        result.push(queue.shift()!);
+        remaining--;
+        addedInPass = true;
+      }
+    }
+    if (!addedInPass) break;
+  }
+  return result;
+}
+
+function place(chunks: Task[], exams: Exam[], start: string, used: Record<string, number>) {
+  const deadline: Record<string, string> = Object.fromEntries(exams.map((e) => [e.id, e.date]));
+  const ordered = interleaveByUnit(chunks, deadline);
   const placed: Task[] = [];
   const overflow: Task[] = [];
-  for (const c of sorted) {
+
+  // Calculate total work vs available days per exam to spread topics realistically across days
+  const maxDeadline = exams.reduce((m, e) => (e.date > m ? e.date : m), start);
+  const totalDays = Math.max(1, daysBetween(start, maxDeadline));
+  const totalChunkMin = ordered.reduce((s, c) => s + c.minutes, 0);
+  const totalUsedMin = Object.values(used).reduce((s, v) => s + v, 0);
+  const maxChunkMin = ordered.reduce((m, c) => Math.max(m, c.minutes), 0);
+  const targetDailyMin = Math.max(
+    maxChunkMin,
+    Math.ceil((totalChunkMin + totalUsedMin) / totalDays / 15) * 15,
+  );
+
+  for (const c of ordered) {
     const end = deadline[c.examId] ?? "";
     let day = start;
     let ok = false;
+    // Pass 1: distribute realistically across available days using balanced daily target
     while (day < end) {
-      const cap = capacity(exams, day);
+      const cap = Math.min(capacity(exams, day), targetDailyMin);
       if ((used[day] ?? 0) + c.minutes <= cap) {
         used[day] = (used[day] ?? 0) + c.minutes;
         placed.push({ ...c, date: day });
@@ -92,35 +221,77 @@ function place(chunks: Task[], exams: Exam[], start: string, used: Record<string
       }
       day = addDays(day, 1);
     }
+    // Pass 2: use full daily capacity if balanced target was full
+    if (!ok) {
+      day = start;
+      while (day < end) {
+        const cap = capacity(exams, day);
+        if ((used[day] ?? 0) + c.minutes <= cap) {
+          used[day] = (used[day] ?? 0) + c.minutes;
+          placed.push({ ...c, date: day });
+          ok = true;
+          break;
+        }
+        day = addDays(day, 1);
+      }
+    }
     if (!ok) overflow.push({ ...c, date: "" });
   }
   return { placed, overflow };
 }
 
-function chunksFor(exam: Exam, topic: Topic, minutes: number, today: string): Task[] {
-  const info = topicPriority(topic, exam, today);
+function chunksFor(
+  exam: Exam,
+  topic: Topic,
+  minutes: number,
+  today: string,
+  papers?: { text: string; review: string }[],
+): Task[] {
+  const info = topicPriority(topic, exam, today, papers);
   const kind: TaskKind =
     topic.status === "Not Started" ? "learn" : topic.status === "Learning" ? "deepen" : "revise";
   const verb = { learn: "Study", deepen: "Deepen", revise: "Revise" }[kind];
   const n = Math.ceil(minutes / 90);
   const each = Math.max(15, Math.round(minutes / n / 15) * 15);
   const unitPrefix = topic.unit ? `${topic.unit}: ` : "";
-  return Array.from({ length: n }, (_, i) => ({
-    id: uid(),
-    examId: exam.id,
-    topicId: topic.id,
-    title: `${verb}: ${unitPrefix}${topic.name}${n > 1 ? ` (part ${i + 1}/${n})` : ""}`,
-    date: "",
-    minutes: each,
-    priority: info.level,
-    score: info.score,
-    kind,
-    done: false,
-    subtopics: topic.subtopics,
-  }));
+  const distinctSubtopics = (topic.subtopics ?? []).filter(
+    (s) => s.trim() && s.trim().toLowerCase() !== topic.name.trim().toLowerCase(),
+  );
+
+  return Array.from({ length: n }, (_, i) => {
+    let sessionSubtopics = distinctSubtopics;
+    if (n > 1 && distinctSubtopics.length >= n) {
+      const perChunk = Math.ceil(distinctSubtopics.length / n);
+      sessionSubtopics = distinctSubtopics.slice(i * perChunk, (i + 1) * perChunk);
+    }
+    const subtopicSuffix = sessionSubtopics.length > 0 ? ` — ${sessionSubtopics.join(", ")}` : "";
+    const sessionPart = n > 1 && distinctSubtopics.length < n ? ` (Session ${i + 1}/${n})` : "";
+
+    return {
+      id: uid(),
+      examId: exam.id,
+      topicId: topic.id,
+      title: `${verb}: ${unitPrefix}${topic.name}${subtopicSuffix}${sessionPart}`,
+      date: "",
+      minutes: each,
+      priority: info.level,
+      score: info.score,
+      kind,
+      done: false,
+      unit: topic.unit,
+      topicName: topic.name,
+      subtopics: sessionSubtopics.length > 0 ? sessionSubtopics : topic.subtopics,
+      priorityVerified: info.verified,
+    };
+  });
 }
 
-export function generatePlan(exams: Exam[], prev: Plan | null, today: string): Plan {
+export function generatePlan(
+  exams: Exam[],
+  prev: Plan | null,
+  today: string,
+  papers?: { text: string; review: string }[],
+): Plan {
   const kept = (prev?.tasks ?? []).filter((t) => t.done);
   const doneMin: Record<string, number> = {};
   const used: Record<string, number> = {};
@@ -133,7 +304,7 @@ export function generatePlan(exams: Exam[], prev: Plan | null, today: string): P
   for (const exam of exams.filter((e) => e.date > today)) {
     for (const topic of exam.topics) {
       const rem = estimateMinutes(topic) - (doneMin[topic.id] ?? 0);
-      if (rem >= 15) chunks.push(...chunksFor(exam, topic, rem, today));
+      if (rem >= 15) chunks.push(...chunksFor(exam, topic, rem, today, papers));
     }
   }
   const { placed, overflow } = place(chunks, exams, today, used);

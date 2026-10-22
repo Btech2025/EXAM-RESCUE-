@@ -8,8 +8,18 @@ import type { Task } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 export function TaskRow({ task, sub }: { task: Task; sub?: string | undefined }) {
+  const distinctSubtopics = (task.subtopics ?? []).filter(
+    (s) =>
+      s.trim() &&
+      s.trim().toLowerCase() !== (task.topicName ?? "").trim().toLowerCase() &&
+      !task.title.toLowerCase().includes(s.trim().toLowerCase()),
+  );
+
   return (
     <button
+      type="button"
+      role="checkbox"
+      aria-checked={task.done}
       onClick={(e) => {
         const completing = !task.done;
         actions.toggleTask(task.id);
@@ -41,20 +51,32 @@ export function TaskRow({ task, sub }: { task: Task; sub?: string | undefined })
         {task.done && <Check className="animate-check h-3.5 w-3.5" strokeWidth={3} />}
       </span>
       <span className="min-w-0 flex-1">
-        <span
-          className={cn(
-            "block truncate text-sm transition-all duration-300",
-            task.done
-              ? "line-through text-muted-foreground opacity-75 font-medium"
-              : "font-semibold text-foreground",
+        <span className="flex flex-wrap items-center gap-1.5">
+          {task.unit && (
+            <span className="inline-flex shrink-0 items-center rounded bg-primary/10 px-1.5 py-0.5 font-mono text-[10px] font-bold text-primary">
+              {task.unit}
+            </span>
           )}
-        >
-          {task.title}
+          <span
+            className={cn(
+              "truncate text-sm transition-all duration-300",
+              task.done
+                ? "line-through text-muted-foreground opacity-75 font-medium"
+                : "font-semibold text-foreground",
+            )}
+          >
+            {task.title}
+          </span>
         </span>
+        {distinctSubtopics.length > 0 && (
+          <span className="mt-0.5 block truncate text-xs text-muted-foreground">
+            Subtopics: {distinctSubtopics.join(", ")}
+          </span>
+        )}
         {sub && <span className="block text-xs text-muted-foreground font-medium">{sub}</span>}
       </span>
-      <span className="hidden sm:block">
-        <PriorityBadge level={task.priority} />
+      <span className="shrink-0">
+        <PriorityBadge level={task.priority} verified={task.priorityVerified} />
       </span>
       <span className="font-mono text-xs text-muted-foreground">{fmtMin(task.minutes)}</span>
     </button>

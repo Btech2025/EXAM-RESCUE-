@@ -78,11 +78,16 @@ const ROMAN_NUMERALS: Record<string, number> = {
   viii: 8,
   ix: 9,
   x: 10,
-  a: 1,
-  b: 2,
-  c: 3,
-  d: 4,
-  e: 5,
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  "01": 1,
+  "02": 2,
+  "03": 3,
+  "04": 4,
+  "05": 5,
   "1": 1,
   "2": 2,
   "3": 3,
@@ -117,81 +122,140 @@ export function toRomanUnit(n: number): string {
   }
 }
 
+function normalizeHeadingChars(val: string): string {
+  return val
+    .replace(/[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/g, "-")
+    .replace(/[\uFF1A]/g, ":")
+    .replace(/\u2160|\u2170/g, "I")
+    .replace(/\u2161|\u2171/g, "II")
+    .replace(/\u2162|\u2172/g, "III")
+    .replace(/\u2163|\u2173/g, "IV")
+    .replace(/\u2164|\u2174/g, "V");
+}
+
 function parseUnitNumber(val: string): number {
-  const clean = val.trim().toLowerCase();
+  const clean = normalizeHeadingChars(val).trim().toLowerCase();
   if (ROMAN_NUMERALS[clean]) return ROMAN_NUMERALS[clean];
   const num = parseInt(clean, 10);
   return isNaN(num) ? 1 : num;
 }
 
-/**
- * Enhanced syllabus parser that extracts individual topics while preserving unit context.
- */
-export function parseSyllabus(text: string): SyllabusTopic[] {
-  if (!text.trim())
-    throw new Error("No readable text found. Paste the syllabus text or enter topics manually.");
-  let unit = "Unassigned";
-  const topics: SyllabusTopic[] = [];
-  let last: SyllabusTopic | undefined;
+// Matches explicit unit headings such as:
+// "Unit 1", "Unit I", "UNIT-1", "Unit: 1", "Unit :- 1", "Unit : - 1", "Unit No. 1", "Unit No 1", "UNIT-II", "Module 1", etc.
+const UNIT_HEADING_REGEX =
+  /^(?:\d+[.)]\s*)?(?:\[\s*)?(?:unit|un1t|u\s*n\s*i\s*t|module|modu1e)\b(?:\s*[:–.—-]*\s*(?:no\b\.?|num(?:ber)?\b\.?|#))?[\s:–.—-]*(0?[1-9]\d*|[ivx]+|one|two|three|four|five|[1l|!]v|[1l|]{2,3})\b(?:\s*\])?(?:\s*(?:[:–.—-]\s*)+(.*)|\s+(.+))?$/i;
 
-  for (const raw of text.split(/\r?\n/)) {
-    const line = raw.trim().replace(/^[•*-]\s*/, "");
-    if (!line || /^page\s+\d+$/i.test(line)) continue;
-    if (/^(unit|module|chapter|section)\s*[-:–]?\s*(\d+|[ivx]+)\b/i.test(line)) {
-      unit = line;
-      last = undefined;
-      continue;
-    }
-    if (/^(learning\s+)?(objectives?|outcomes?)\s*:/i.test(line)) {
-      if (last) last.objectives = line;
-      continue;
-    }
-    if (/^(marks|weight(age)?|distribution)\s*:/i.test(line)) {
-      if (last) last.marks = line;
-      continue;
-    }
-    const clean = line.replace(/^\d+[.)]\s*/, "");
-    const [name, ...details] = clean.split(/:\s*/);
-    if (!name?.trim()) continue;
-    last = {
-      id: `syllabus-${topics.length}-${normalize(name)}`,
-      name: name.trim(),
-      unit,
-      subtopics: details
-        .join(": ")
-        .split(/[,;]\s*/)
-        .filter(Boolean),
-      marks: line.match(/\b\d+(?:\.\d+)?\s*(?:marks|%)\b/i)?.[0] ?? "",
-      objectives: "",
-      importance: "Medium",
-      difficulty: "Medium",
-      status: "Not Started",
-    };
-    topics.push(last);
-  }
-  if (!topics.length)
-    throw new Error("No topic lines found. Add topic names beneath each unit heading.");
-  return topics;
+const POST_SYLLABUS_BOUNDARY_REGEX =
+  /^(?:text\s*books?|reference\s*books?|references?|suggested\s*readings?|recommended\s*readings?|question\s*paper\s*pattern|examination\s*scheme|scheme\s*of\s*examination|internal\s*assessment|evaluation\s*scheme|practical\s*work|laboratory|experiments?|list\s+of\s+experiments?|web\s*references?|online\s*resources?|e-?resources?)\b/i;
+
+function isOutcomePreambleLine(l: string): boolean {
+  const stripped = normalizeHeadingChars(l)
+    .replace(/^[•*–o>·-]\s*/, "")
+    .trim();
+  return /^(?:at\s+the\s+end\s+of\s+(?:the|this)\s+course|after\s+(?:completing|completion\s+of)\s+(?:the|this)\s+course|upon\s+(?:successful\s+)?completion\s+of|on\s+completion\s+of\s+(?:the|this)\s+course|(?:the\s+)?(?:students?|learners?|candidates?)\s+(?:will|shall|should)\s+be\s+able\s+to|to\s+enable\s+(?:the\s+)?students?\s+to)\b/i.test(
+    stripped,
+  );
 }
 
-function extractCourseOutcomeCodes(str: string): string[] {
-  const matches = str.match(/\b(?:co|course\s+outcome)\s*[-_.:]?\s*([1-9]\d?)\b/gi);
-  if (!matches) return [];
-  const cos = new Set<string>();
-  for (const m of matches) {
-    const numMatch = m.match(/([1-9]\d?)$/);
-    if (numMatch && numMatch[1]) {
-      cos.add(`CO${numMatch[1]}`);
-    }
+function isMetadataSectionHeading(l: string): boolean {
+  const stripped = normalizeHeadingChars(l)
+    .replace(/^[•*–o>·\d.)\s]+/, "")
+    .trim();
+  return (
+    /^(?:(?:course|learning|program|programme|educational|subject|student)\s+)?(?:outcomes?|objectives?)(?:\s*\([^)]*\))?\s*[:–.—-]*$/i.test(
+      stripped,
+    ) ||
+    /^(?:course\s+outcomes?|course\s+objectives?|learning\s+outcomes?|learning\s+objectives?|program(?:me)?\s+outcomes?|program(?:me)?\s+specific\s+outcomes?|program(?:me)?\s+educational\s+objectives?)\b/i.test(
+      stripped,
+    ) ||
+    /^(?:outcomes?|objectives?|cos?|pos?|psos?|peos?|clos?)(?:\s*\([^)]*\))?(?:\s*[-–/&]\s*(?:cos?|pos?|psos?))?(?:\s+mapping|\s+matrix|\s+attainment)?\s*(?:[:–.—-]+.*)?$/i.test(
+      stripped,
+    ) ||
+    /^(?:co\s*[-–/]\s*po|mapping\s+of\s+(?:course\s+)?outcomes?|articulation\s+matrix|course\s+description|course\s+details?|course\s+overview|course\s+information|course\s+preamble|preamble|syllabus\s+details?|university\s+name|teaching\s+scheme|examination\s+scheme|evaluation\s+scheme|assessment\s+pattern)\b/i.test(
+      stripped,
+    )
+  );
+}
+
+function isOutcomeOrObjectiveLine(l: string): boolean {
+  const stripped = normalizeHeadingChars(l)
+    .replace(/^(?:[•*–o>·-]|\(\d+\)|\([a-z]\)|\d+[.)])\s*/i, "")
+    .trim();
+  return (
+    isMetadataSectionHeading(stripped) ||
+    isOutcomePreambleLine(stripped) ||
+    /^(?:(?:course\s+|learning\s+|program(?:me)?\s+|educational\s+)?(?:outcomes?|objectives?)|cos?|pos?|psos?)(?:\s*[-_.:–—#]?\s*(?:[1-9]\d*|[ivx]+))?\s*[:–.-]/i.test(
+      stripped,
+    ) ||
+    /^(?:co|po|pso|peo|clo)(?:\s*[-_.:–—]?\s*0?[1-9]\d*|\s+[ivx]+|[-_.:–—]\s*[ivx]+)\b/i.test(
+      stripped,
+    )
+  );
+}
+
+function isBoilerplateLine(l: string): boolean {
+  const stripped = normalizeHeadingChars(l)
+    .replace(/^[•*–o>·-]\s*/, "")
+    .trim();
+  return (
+    /^(?:page\s+\d+|university\s*name|course\s*(?:code|no|number|id|title|name|type|category|credits?|details?|objectives?|outcomes?)|subject\s*(?:code|no|number|title|name)|paper\s*(?:code|no|title|name)|program(?:me)?\s*outcomes?|semester|academic\s+year|session|credits?|l\s*[-:/]\s*t\s*[-:/]\s*p|lecture\s*hours?|total\s*hours?|contact\s*hours?|hours?\s*[:/]|max(?:imum)?\s*marks?|min(?:imum)?\s*(?:pass\s*)?marks?|internal\s*marks?|external\s*marks?|duration\s*of\s*exam|time\s*allowed|prerequisites?|pre-requisites?|co-requisites?|text\s*books?|reference\s*books?|references?|recommended\s+reading|suggested\s+readings?)\b/i.test(
+      stripped,
+    ) ||
+    /^(?:[a-z\s.&,'()-]+\b(?:university|college|institute|vidyapith|academy|polytechnic|school\s+of|faculty\s+of)\b.*|department\s+of\b.*|(?:programme|program|degree|branch|specialization|regulation|curriculum)\s*[:–-].*|(?:b\.?\s*tech|b\.?\s*e|m\.?\s*tech|m\.?\s*e|b\.?\s*sc|m\.?\s*sc|bca|mca|mba)\b.*)$/i.test(
+      stripped,
+    )
+  );
+}
+
+function matchExplicitUnitHeading(line: string): RegExpMatchArray | null {
+  const normLine = normalizeHeadingChars(line);
+  if (
+    isOutcomeOrObjectiveLine(normLine) ||
+    isMetadataSectionHeading(normLine) ||
+    POST_SYLLABUS_BOUNDARY_REGEX.test(normLine) ||
+    isBoilerplateLine(normLine)
+  ) {
+    return null;
   }
-  return Array.from(cos);
+  const m = normLine.match(UNIT_HEADING_REGEX);
+  if (!m || !m[1]) return null;
+  const rawRem = (m[2] ?? m[3] ?? "").replace(/^[\s:–.—-]+/, "").trim();
+  if (
+    rawRem &&
+    (isMetadataSectionHeading(rawRem) ||
+      isOutcomeOrObjectiveLine(rawRem) ||
+      POST_SYLLABUS_BOUNDARY_REGEX.test(rawRem) ||
+      isBoilerplateLine(rawRem))
+  ) {
+    return null;
+  }
+  return m;
+}
+
+/**
+ * Enhanced syllabus parser that extracts individual topics strictly from recognized syllabus units.
+ * Excludes Course Outcomes, Course Objectives, Program Outcomes, University/Course metadata, and References.
+ */
+export function parseSyllabus(text: string): SyllabusTopic[] {
+  if (!text || !text.trim()) {
+    throw new Error("No readable text found. Paste the syllabus text or enter topics manually.");
+  }
+
+  const units = extractSyllabusUnits(text);
+  const topics = units.flatMap((u) => u.topics);
+  if (!topics.length) {
+    throw new Error("No topic lines found. Add topic names beneath each unit heading.");
+  }
+  return topics;
 }
 
 function cleanTitleOfCourseOutcomes(title: string): string {
   return title
-    .replace(/\[\s*(?:(?:co|course\s+outcome)\s*[-_.:]?\s*\d+\s*[,;/]?\s*)+\]/gi, "")
-    .replace(/\(\s*(?:(?:co|course\s+outcome)\s*[-_.:]?\s*\d+\s*[,;/]?\s*)+\)/gi, "")
-    .replace(/\s*[-:–]\s*(?:(?:co|course\s+outcome)\s*[-_.:]?\s*\d+\s*[,;/]?\s*)+$/gi, "")
+    .replace(/\[\s*(?:(?:co|po|pso|course\s+outcomes?)\s*[-_.:]?\s*\d+\s*[,;/]?\s*)+\]/gi, "")
+    .replace(/\(\s*(?:(?:co|po|pso|course\s+outcomes?)\s*[-_.:]?\s*\d+\s*[,;/]?\s*)+\)/gi, "")
+    .replace(/\s*[-:–]\s*(?:(?:co|po|pso|course\s+outcomes?)\s*[-_.:]?\s*\d+\s*[,;/]?\s*)+$/gi, "")
+    .replace(/\(\s*\d+\s*(?:hours?|hrs?|lectures?|periods?)\s*\)/gi, "")
+    .replace(/\[\s*\d+\s*(?:hours?|hrs?|lectures?|periods?)\s*\]/gi, "")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -207,9 +271,9 @@ function isUnreadableScanLine(line: string): boolean {
 }
 
 /**
- * Intelligent Unit Extractor for uploaded syllabus PDFs.
- * Extracts actual syllabus starting from "Unit I" and ending at the end of "Unit IV", inclusive.
- * Ignores unrelated preamble before Unit I and trailing content after Unit IV.
+ * Intelligent Unit Extractor for uploaded syllabus PDFs, Word documents, or pasted text.
+ * Extracts actual syllabus units starting from "Unit I" and ending at the end of "Unit IV", inclusive.
+ * Ignores Course Outcomes, university/college names, course details, objectives, and trailing references.
  * Strictly uses provided syllabus content — never generates generic, assumed, or invented topics.
  */
 export function extractSyllabusUnits(
@@ -219,182 +283,142 @@ export function extractSyllabusUnits(
 ): ParsedUnit[] {
   if (!text || !text.trim()) {
     throw new Error(
-      "No readable syllabus text found. Please upload a valid text-based syllabus PDF or enter topics manually.",
+      "No readable syllabus text found. Please upload a valid PDF or Word document, or paste your syllabus text.",
     );
   }
 
-  const lines = text
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean);
-
-  if (lines.length === 0) {
-    throw new Error(
-      "The syllabus document contains no readable lines. Please upload a valid PDF or enter topics manually.",
+  // Pre-split inline Unit headings or trailing Course Outcomes / References on non-outcome lines
+  const preSplitLines = text.split(/\r?\n/).flatMap((rawLine) => {
+    const trimmed = rawLine.trim();
+    if (!trimmed) return [];
+    const withSplitMetadata = trimmed.replace(
+      /([^\r\n])\s+\b((?:course\s+outcomes?|course\s+objectives?|program(?:me)?\s+outcomes?|program(?:me)?\s+specific\s+outcomes?|text\s*books?|reference\s*books?|references?)\s*(?:\([^)]*\))?\s*[:–-])/gi,
+      "$1\n$2",
     );
+    return withSplitMetadata.split(/\r?\n/).flatMap((segment) => {
+      const seg = segment.trim();
+      if (!seg) return [];
+      if (isOutcomeOrObjectiveLine(seg) || isMetadataSectionHeading(seg)) {
+        return [seg];
+      }
+      return seg
+        .replace(
+          /([^\r\n])\s+\b((?:unit|un1t|module|modu1e)\b(?:\s*[:–.—-]*\s*(?:no\b\.?|num(?:ber)?\b\.?|#))?[\s:–.—-]*(?:0?[1-9]\d*|[ivx]+|one|two|three|four|five)\b\s*(?:[:–.—-]\s*)+)/gi,
+          "$1\n$2",
+        )
+        .split(/\r?\n/);
+    });
+  });
+
+  const rawLines = preSplitLines.map((l) => l.replace(/\s+/g, " ").trim()).filter(Boolean);
+
+  if (rawLines.length === 0) {
+    throw new Error(
+      "The syllabus document contains no readable lines. Please upload a valid PDF or Word document, or paste your syllabus text.",
+    );
+  }
+
+  const postSyllabusBoundaryRegex = POST_SYLLABUS_BOUNDARY_REGEX;
+  const isOutcomeLineRegex = isOutcomeOrObjectiveLine;
+
+  // Merge wrapped continuation lines inside topic paragraphs (e.g. lines ending with comma or preposition)
+  const lines: string[] = [];
+  for (let i = 0; i < rawLines.length; i++) {
+    let curr = rawLines[i]!;
+    while (
+      i + 1 < rawLines.length &&
+      (!matchExplicitUnitHeading(curr) || /,\s*$/.test(curr)) &&
+      !isOutcomeLineRegex(curr) &&
+      !isMetadataSectionHeading(curr) &&
+      !postSyllabusBoundaryRegex.test(curr) &&
+      !isBoilerplateLine(curr) &&
+      !isUnreadableScanLine(curr) &&
+      (/(?:[,;–-]|\b(?:and|or|of|in|to|for|with|on|by|from|vs|&))\s*$/i.test(curr) ||
+        (!matchExplicitUnitHeading(curr) && /^[a-z]/.test(rawLines[i + 1]!) && !/[.;]$/.test(curr)))
+    ) {
+      const next = rawLines[i + 1]!;
+      if (
+        matchExplicitUnitHeading(next) !== null ||
+        isOutcomeLineRegex(next) ||
+        isMetadataSectionHeading(next) ||
+        postSyllabusBoundaryRegex.test(next) ||
+        isBoilerplateLine(next) ||
+        isUnreadableScanLine(next) ||
+        /^[•*–o>·-]\s*|^\d+[.)]\s*|^[a-z][.)]\s*/i.test(next)
+      ) {
+        break;
+      }
+      curr = `${curr.replace(/-\s*$/, "")} ${next}`;
+      i++;
+    }
+    lines.push(curr);
   }
 
   const unitsMap = new Map<
     number,
     {
       title: string;
+      hasExplicitTitle: boolean;
       rawHeading: string;
       topics: SyllabusTopic[];
-      courseOutcomes: string[];
       flaggedNotes: string[];
     }
   >();
 
   let currentUnitNum = 0;
   let currentUnitTitle = "";
-  let currentRawHeading = "";
-  let hasStartedUnitRange = false;
-  const unassignedTopics: SyllabusTopic[] = [];
-  const unassignedCourseOutcomes: string[] = [];
-  const unassignedFlaggedNotes: string[] = [];
+  let inNonSyllabusSection = false;
 
-  // Match: Unit 1, Unit I, Unit - 1, Unit: 1, Module 1, Module I, Chapter 1, Section A, Part 1, etc.
-  const unitRegex =
-    /^(?:unit|un1t|u\s*n\s*i\s*t|module|modu1e|chapter|section|part)\s*[-:–.]?\s*([1-9]\d*|[ivx]+|[1l|]v|[1l|]{2,3}|[a-e])\b(?:\s*[:–.-]\s*(.*))?$/i;
+  const maxTargetUnit = 4; // Syllabus range spans Unit I through Unit IV, inclusive
 
-  // Boundary markers indicating the conclusion of syllabus content after Unit IV
-  const postSyllabusBoundaryRegex =
-    /^(?:text\s*books?|reference\s*books?|references?|suggested\s*readings?|question\s*paper\s*pattern|examination\s*scheme|scheme\s*of\s*examination|internal\s*assessment|evaluation\s*scheme|practical\s*work|laboratory|experiments?|web\s*references?)\b/i;
-
-  const maxTargetUnit = 4; // Syllabus range strictly spans Unit I through Unit IV, inclusive
-
-  for (let idx = 0; idx < lines.length; idx++) {
-    const line = lines[idx]!;
-
-    // Check standalone Course Outcome lines (can occur before Unit I or within syllabus)
-    const isOutcomeLine =
-      /^(?:(?:course\s+)?outcomes?|cos?)\s*[:–-]/i.test(line) ||
-      /^co\s*[-_.:]?\s*[1-9]\d?\s*[:–-]/i.test(line);
-
-    if (isOutcomeLine) {
-      const cos = extractCourseOutcomeCodes(line);
-      if (cos.length > 0) {
-        if (currentUnitNum > 0 && unitsMap.has(currentUnitNum)) {
-          unitsMap.get(currentUnitNum)!.courseOutcomes.push(...cos);
-        } else {
-          unassignedCourseOutcomes.push(...cos);
-        }
-        continue;
-      }
-    }
-
-    const match = line.match(unitRegex);
-    if (match && match[1]) {
-      const parsedNum = parseUnitNumber(match[1]);
-
-      // If we encounter a unit beyond the maxTargetUnit (e.g. Unit V when target is Unit IV):
-      // Ignore content after Unit IV as requested.
-      if (parsedNum > maxTargetUnit) {
-        break; // Stop parsing: reached end of Unit IV range!
-      }
-
-      hasStartedUnitRange = true;
-      currentUnitNum = parsedNum;
-      currentRawHeading = line;
-
-      const headerCos = extractCourseOutcomeCodes(line);
-
-      // Extract title from same line if present
-      let extractedTitle = (match[2] || "").replace(/^[:–.-]\s*/, "").trim();
-
-      // If unit title is empty on this line, check if subsequent line contains unit title
-      if (!extractedTitle && idx + 1 < lines.length) {
-        const nextLine = lines[idx + 1]!;
-        if (
-          !unitRegex.test(nextLine) &&
-          !postSyllabusBoundaryRegex.test(nextLine) &&
-          !/^[•*–o>·-]\s*|^\d+[.)]\s*/.test(nextLine) &&
-          nextLine.length > 2 &&
-          nextLine.length < 120
-        ) {
-          extractedTitle = nextLine.replace(/^[:–.-]\s*/, "").trim();
-          const nextCos = extractCourseOutcomeCodes(nextLine);
-          headerCos.push(...nextCos);
-          idx++;
-        }
-      }
-
-      const cleanedTitle = cleanTitleOfCourseOutcomes(extractedTitle) || extractedTitle;
-      currentUnitTitle = cleanedTitle || toRomanUnit(currentUnitNum);
-
-      if (!unitsMap.has(currentUnitNum)) {
-        unitsMap.set(currentUnitNum, {
-          title: currentUnitTitle,
-          rawHeading: line,
-          topics: [],
-          courseOutcomes: headerCos,
-          flaggedNotes: [],
-        });
-      } else {
-        unitsMap.get(currentUnitNum)!.courseOutcomes.push(...headerCos);
-      }
-      continue;
-    }
-
-    // If we have not reached Unit I yet, ignore unrelated preamble content
-    if (!hasStartedUnitRange) {
-      continue;
-    }
-
-    // If we are at/after Unit IV and hit trailing post-syllabus reference sections:
-    if (currentUnitNum >= maxTargetUnit && postSyllabusBoundaryRegex.test(line)) {
-      break; // End of Unit IV reached, ignore trailing textbooks/references
-    }
-
-    // Detect unreadable scan artifacts
-    if (isUnreadableScanLine(line)) {
-      const note = `Unreadable scan artifact: "${line.slice(0, 45)}..."`;
-      if (currentUnitNum > 0 && unitsMap.has(currentUnitNum)) {
-        unitsMap.get(currentUnitNum)!.flaggedNotes.push(note);
-      } else {
-        unassignedFlaggedNotes.push(note);
-      }
-      continue;
-    }
-
-    // Skip common document boilerplate/metadata
+  const parseAndPushTopicLine = (rawTopicText: string, unitNum: number) => {
+    if (unitNum <= 0 || !unitsMap.has(unitNum)) return;
+    const clean = rawTopicText.replace(/^[•*–o>·-]\s*|^\d+[.)]\s*|^[a-z][.)]\s*/i, "").trim();
+    if (!clean || clean.length < 2) return;
     if (
-      /^(?:page\s+\d+|course\s+code|credits?|textbooks?|references?|hours?:\s*\d+|prerequisites?|recommended\s+reading)/i.test(
-        line,
-      )
+      isOutcomeLineRegex(clean) ||
+      isMetadataSectionHeading(clean) ||
+      postSyllabusBoundaryRegex.test(clean) ||
+      isBoilerplateLine(clean)
     ) {
-      continue;
+      return;
     }
 
-    // Line beneath a unit in the Unit I..Unit IV range
-    const clean = line.replace(/^[•*–o>·-]\s*|^\d+[.)]\s*|^[a-z][.)]\s*/, "").trim();
-    if (!clean || clean.length < 2) continue;
-
-    // Check for inline course outcomes in topic lines (e.g. "Process Scheduling [CO1]")
-    const topicCos = extractCourseOutcomeCodes(clean);
-    if (topicCos.length > 0 && currentUnitNum > 0 && unitsMap.has(currentUnitNum)) {
-      unitsMap.get(currentUnitNum)!.courseOutcomes.push(...topicCos);
+    const detectedMarks = rawTopicText.match(/\b\d+(?:\.\d+)?\s*(?:marks|%)\b/i)?.[0] ?? "";
+    const cleanWithoutCo = cleanTitleOfCourseOutcomes(clean);
+    if (!cleanWithoutCo || cleanWithoutCo.length < 2) return;
+    if (
+      isOutcomeLineRegex(cleanWithoutCo) ||
+      isMetadataSectionHeading(cleanWithoutCo) ||
+      postSyllabusBoundaryRegex.test(cleanWithoutCo) ||
+      isBoilerplateLine(cleanWithoutCo)
+    ) {
+      return;
     }
-
-    const cleanWithoutCo = cleanTitleOfCourseOutcomes(clean) || clean;
 
     const colonIdx = cleanWithoutCo.indexOf(":");
     let topicName = cleanWithoutCo;
     let subtopics: string[] = [];
 
     if (colonIdx > 0 && colonIdx < 80) {
-      topicName = cleanWithoutCo.slice(0, colonIdx).trim();
-      const rest = cleanWithoutCo.slice(colonIdx + 1).trim();
+      topicName = cleanWithoutCo
+        .slice(0, colonIdx)
+        .replace(/[\s:–.—-]+$/, "")
+        .trim();
+      const rest = cleanWithoutCo
+        .slice(colonIdx + 1)
+        .replace(/^[\s:–.—-]+/, "")
+        .trim();
       if (rest) {
         subtopics = rest
           .split(/[,;]\s*/)
-          .map((s) => s.trim())
+          .map((s) => s.replace(/\.$/, "").trim())
           .filter(Boolean);
       }
     } else if (cleanWithoutCo.includes(",") || cleanWithoutCo.includes(";")) {
       const parts = cleanWithoutCo
         .split(/[,;]\s*/)
-        .map((s) => s.trim())
+        .map((s) => s.replace(/\.$/, "").trim())
         .filter(Boolean);
       if (parts.length > 1) {
         topicName = parts[0]!;
@@ -402,80 +426,191 @@ export function extractSyllabusUnits(
       }
     }
 
-    const romanUnitLabel = toRomanUnit(currentUnitNum);
+    const romanUnitLabel = toRomanUnit(unitNum);
     const topicItem: SyllabusTopic = {
       id: `topic-${uid()}`,
       name: topicName,
       unit: romanUnitLabel,
-      unitNumber: currentUnitNum,
+      unitNumber: unitNum,
       subtopics: subtopics.length > 0 ? subtopics : [topicName],
-      marks: "",
+      marks: detectedMarks,
       objectives: "",
       difficulty: "Medium",
-      importance: "High",
+      importance: detectedMarks ? "High" : "Medium",
       status: "Not Started",
+      priorityVerified: Boolean(detectedMarks),
     };
 
-    if (currentUnitNum > 0 && unitsMap.has(currentUnitNum)) {
-      unitsMap.get(currentUnitNum)!.topics.push(topicItem);
-    } else {
-      unassignedTopics.push(topicItem);
+    unitsMap.get(unitNum)!.topics.push(topicItem);
+  };
+
+  for (let idx = 0; idx < lines.length; idx++) {
+    const line = lines[idx]!;
+
+    // 1. Check if this line is an explicit syllabus Unit heading (Unit I, Unit 1, Unit :- 1, UNIT-II, etc.)
+    const match = matchExplicitUnitHeading(line);
+    if (match && match[1]) {
+      const parsedNum = parseUnitNumber(match[1]);
+
+      // Stop extracting when a unit beyond Unit IV (e.g., Unit V) begins
+      if (parsedNum > maxTargetUnit) {
+        currentUnitNum = 0;
+        break;
+      }
+
+      inNonSyllabusSection = false;
+      currentUnitNum = parsedNum;
+
+      // Extract title (and potential inline topics) from same line if present
+      const rawRemainder = (match[2] ?? match[3] ?? "").replace(/^[\s:–.—-]+/, "").trim();
+      let extractedTitle = cleanTitleOfCourseOutcomes(rawRemainder);
+      let inlineTopicsFromHeader = "";
+
+      // Check if header line contains "Title: Topic1, Topic2" or "Title - Topic1, Topic2"
+      const secondColon = extractedTitle.indexOf(":");
+      const dashSepMatch = extractedTitle.match(/^([^,;:]{3,65}?)\s+[-–—]\s+(.+)$/);
+      if (secondColon > 0 && secondColon < 70) {
+        inlineTopicsFromHeader = extractedTitle
+          .slice(secondColon + 1)
+          .replace(/^[\s:–.—-]+/, "")
+          .trim();
+        extractedTitle = extractedTitle
+          .slice(0, secondColon)
+          .replace(/[\s:–.—-]+$/, "")
+          .trim();
+      } else if (dashSepMatch && dashSepMatch[1] && dashSepMatch[2]) {
+        extractedTitle = dashSepMatch[1].replace(/[\s:–.—-]+$/, "").trim();
+        inlineTopicsFromHeader = dashSepMatch[2].replace(/^[\s:–.—-]+/, "").trim();
+      } else if (extractedTitle.includes(",") || extractedTitle.includes(";")) {
+        inlineTopicsFromHeader = extractedTitle;
+        extractedTitle = extractedTitle.split(/[,;]/)[0]?.trim() || extractedTitle;
+      }
+
+      // If unit title is empty on this line, check if subsequent line contains unit title
+      if (!extractedTitle && idx + 1 < lines.length) {
+        const nextLine = lines[idx + 1]!;
+        const lineAfterNext = idx + 2 < lines.length ? lines[idx + 2]! : "";
+        const nextIsAnotherUnitOrEnd =
+          !lineAfterNext ||
+          matchExplicitUnitHeading(lineAfterNext) !== null ||
+          postSyllabusBoundaryRegex.test(lineAfterNext) ||
+          isOutcomeLineRegex(lineAfterNext) ||
+          isMetadataSectionHeading(lineAfterNext);
+        const nextLooksLikeTopicList =
+          nextLine.includes(",") || nextLine.includes(";") || nextLine.includes(":");
+        const lineAfterLooksLikeTopicListOrBullets =
+          lineAfterNext.includes(",") ||
+          lineAfterNext.includes(";") ||
+          lineAfterNext.includes(":") ||
+          /^[•*–o>·-]\s*|^\d+[.)]\s*/.test(lineAfterNext);
+
+        if (
+          matchExplicitUnitHeading(nextLine) === null &&
+          !postSyllabusBoundaryRegex.test(nextLine) &&
+          !isOutcomeLineRegex(nextLine) &&
+          !isMetadataSectionHeading(nextLine) &&
+          !isBoilerplateLine(nextLine) &&
+          !/^[•*–o>·-]\s*|^\d+[.)]\s*/.test(nextLine) &&
+          nextLine.length > 2 &&
+          nextLine.length < 140
+        ) {
+          if (nextLooksLikeTopicList) {
+            // The line beneath "Unit I" is a list of topics (or "Title: topics")
+            inlineTopicsFromHeader = nextLine.replace(/^[\s:–.—-]+/, "").trim();
+            const firstPart = inlineTopicsFromHeader.split(/[,;:]/)[0]?.trim() || "";
+            extractedTitle = firstPart;
+            idx++;
+          } else if (!nextIsAnotherUnitOrEnd && !lineAfterLooksLikeTopicListOrBullets) {
+            // Multiple plain lines beneath a bare "Unit X" heading: keep first line as both title and first topic
+            extractedTitle = nextLine.replace(/^[\s:–.—-]+/, "").trim();
+            inlineTopicsFromHeader = extractedTitle;
+            idx++;
+          } else {
+            extractedTitle = nextLine.replace(/^[\s:–.—-]+/, "").trim();
+            idx++;
+          }
+        }
+      }
+
+      const cleanedTitle = cleanTitleOfCourseOutcomes(extractedTitle) || extractedTitle;
+      const hasExplicitTitle = Boolean(cleanedTitle);
+      currentUnitTitle = cleanedTitle || toRomanUnit(currentUnitNum);
+
+      if (!unitsMap.has(currentUnitNum)) {
+        unitsMap.set(currentUnitNum, {
+          title: currentUnitTitle,
+          hasExplicitTitle,
+          rawHeading: line,
+          topics: [],
+          flaggedNotes: [],
+        });
+      } else {
+        const existing = unitsMap.get(currentUnitNum)!;
+        if (!existing.hasExplicitTitle && hasExplicitTitle) {
+          existing.title = currentUnitTitle;
+          existing.hasExplicitTitle = true;
+        }
+      }
+
+      if (inlineTopicsFromHeader) {
+        parseAndPushTopicLine(inlineTopicsFromHeader, currentUnitNum);
+      }
+      continue;
     }
+
+    // 2. Stop the current unit when any non-syllabus section begins (Course Outcomes, Course Objectives,
+    // Program Outcomes, References, Textbooks, Assessment/Evaluation scheme, etc.)
+    if (
+      isMetadataSectionHeading(line) ||
+      isOutcomePreambleLine(line) ||
+      postSyllabusBoundaryRegex.test(line)
+    ) {
+      inNonSyllabusSection = true;
+      currentUnitNum = 0;
+      continue;
+    }
+
+    // 3. Explicitly exclude individual Course Outcome (CO1–CO6) and Program Outcome (PO/PSO) lines
+    if (isOutcomeLineRegex(line)) {
+      continue;
+    }
+
+    // 4. Only extract topics within the boundaries of a recognized syllabus unit
+    if (inNonSyllabusSection || currentUnitNum <= 0 || !unitsMap.has(currentUnitNum)) {
+      continue;
+    }
+
+    // 5. Skip common document boilerplate/metadata (University Name, Course Details, Credits, etc.)
+    if (isBoilerplateLine(line)) {
+      continue;
+    }
+
+    // 6. Detect unreadable scan artifacts inside a recognized unit
+    if (isUnreadableScanLine(line)) {
+      const note = `Unreadable scan artifact: "${line.slice(0, 45)}..."`;
+      unitsMap.get(currentUnitNum)!.flaggedNotes.push(note);
+      continue;
+    }
+
+    parseAndPushTopicLine(line, currentUnitNum);
   }
 
-  // Case 1: No explicit "Unit X" headings found, but actual topic lines were extracted
+  // Require at least one explicit recognized syllabus unit; never treat Course Outcomes or unassigned lines as units
   if (unitsMap.size === 0) {
-    if (unassignedTopics.length === 0) {
-      throw new Error(
-        "Could not detect any units or topics starting from Unit I in the syllabus text. Please check the document or enter topics manually.",
-      );
-    }
-
-    // Partition the REAL extracted topics into balanced units
-    const desiredUnits = maxTargetUnit;
-    const chunkSize = Math.max(1, Math.ceil(unassignedTopics.length / desiredUnits));
-    const result: ParsedUnit[] = [];
-
-    for (let u = 1; u <= desiredUnits; u++) {
-      const slice = unassignedTopics.slice((u - 1) * chunkSize, u * chunkSize);
-      if (slice.length === 0) continue;
-
-      const unitRomanLabel = toRomanUnit(u);
-      const unitTopics = slice.map((t, idx) => ({
-        ...t,
-        unit: unitRomanLabel,
-        unitNumber: u,
-        id: `unit-${u}-topic-${idx + 1}-${uid()}`,
-      }));
-
-      const unitCos = unassignedCourseOutcomes.filter((co) => co === `CO${u}`);
-
-      result.push({
-        id: `unit-${u}`,
-        unitNumber: u,
-        unitLabel: unitRomanLabel,
-        title: unitTopics[0]?.name || unitRomanLabel,
-        topics: unitTopics,
-        selectedForExam: true,
-        courseOutcomes:
-          unitCos.length > 0
-            ? unitCos
-            : unassignedCourseOutcomes.length > 0
-              ? unassignedCourseOutcomes
-              : undefined,
-        flaggedNotes:
-          u === 1 && unassignedFlaggedNotes.length > 0 ? unassignedFlaggedNotes : undefined,
-      });
-    }
-
-    return result;
+    throw new Error(
+      "Could not detect any units or topics starting from Unit I in the syllabus text. Only explicit Unit headings (such as Unit I, Unit 1, Unit :- 1, or UNIT-II) are recognized, and Course Outcomes or metadata are excluded.",
+    );
   }
 
   function formatUnitLabel(rawHeading: string, unitNum: number): string {
     if (/\b(?:unit|un1t)\b/i.test(rawHeading) && /[ivx]+/i.test(rawHeading)) {
       return toRomanUnit(unitNum);
     }
-    if (/\b(?:unit|un1t|module|modu1e)\s*[-:–.]?\s*\d+\b/i.test(rawHeading)) {
+    if (
+      /\b(?:unit|un1t|module|modu1e)\b(?:\s*[:–.—-]*\s*(?:no\b\.?|num(?:ber)?\b\.?|#))?[\s:–.—-]*\d+\b/i.test(
+        rawHeading,
+      )
+    ) {
       return `Unit ${unitNum}`;
     }
     return toRomanUnit(unitNum);
@@ -484,7 +619,12 @@ export function extractSyllabusUnits(
   // Case 2: Explicit units were identified within the Unit I..Unit IV scope
   const maxDetected = Math.max(...unitsMap.keys());
   let targetLimit = 4; // Bounded strictly between Unit I and Unit IV
-  if (maxDetected < 4 && !/\b(?:unit|un1t|module)\s*[-:–.]?\s*(?:iv|4|1v)\b/i.test(text)) {
+  if (
+    maxDetected < 4 &&
+    !/\b(?:unit|un1t|u\s*n\s*i\s*t|module|modu1e)\b(?:\s*[:–.—-]*\s*(?:no\b\.?|num(?:ber)?\b\.?|#))?[\s:–.—-]*(?:iv|4|four|[1l|!]v)\b/i.test(
+      text,
+    )
+  ) {
     targetLimit = maxDetected;
   }
 
@@ -499,48 +639,57 @@ export function extractSyllabusUnits(
     const data = unitsMap.get(unitNum);
     const unitLabel = data ? formatUnitLabel(data.rawHeading, unitNum) : toRomanUnit(unitNum);
 
-    // If a unit in the required range is missing from the scan, flag it for verification without inventing content
+    // If a unit in the required range is missing, flag it for verification without inventing content
     if (!data) {
       return {
         id: `unit-${unitNum}`,
         unitNumber: unitNum,
         unitLabel,
-        title: `${unitLabel} (Missing in scan — please verify)`,
+        title: `${unitLabel} (Missing in syllabus — please verify)`,
         topics: [],
         selectedForExam: index < examUnitLimit,
-        courseOutcomes: [`CO${unitNum}`],
         flaggedNotes: [
-          `${unitLabel} was not detected in the uploaded syllabus. Please verify and enter topics manually.`,
+          `${unitLabel} was not detected in the syllabus text. Please verify and enter topics manually.`,
         ],
       };
     }
 
-    // If an extracted unit has no bullet topics, preserve the EXACT unit title as its topic
-    // Do NOT invent generic filler topics!
-    const topics: SyllabusTopic[] =
-      data.topics.length > 0
-        ? data.topics
-        : [
-            {
-              id: `unit-${unitNum}-topic-1-${uid()}`,
-              name: data.title || unitLabel,
-              unit: unitLabel,
-              unitNumber: unitNum,
-              subtopics: [data.title || unitLabel],
-              marks: "",
-              objectives: "",
-              difficulty: "Medium" as const,
-              importance: "High" as const,
-              status: "Not Started" as const,
-            },
-          ];
+    // If a unit had comma-separated topics inside its title and no separate topic lines, split them
+    if (
+      data.topics.length === 0 &&
+      data.hasExplicitTitle &&
+      (data.title.includes(",") || data.title.includes(";"))
+    ) {
+      parseAndPushTopicLine(data.title, unitNum);
+    }
 
-    // Resolve course outcomes
-    let outcomes = Array.from(new Set(data.courseOutcomes));
-    if (outcomes.length === 0 && unassignedCourseOutcomes.length > 0) {
-      const matchingCo = unassignedCourseOutcomes.find((co) => co === `CO${unitNum}`);
-      if (matchingCo) {
-        outcomes = [matchingCo];
+    // If an extracted unit has no bullet topics:
+    // - If it has an explicit title, preserve that exact title as its topic.
+    // - If it had neither a title nor topics (just a bare "Unit I" heading), flag it with topics: [] instead of guessing!
+    let topics: SyllabusTopic[] = data.topics;
+    const notes = [...data.flaggedNotes];
+
+    if (topics.length === 0) {
+      if (data.hasExplicitTitle && data.title && data.title !== unitLabel) {
+        topics = [
+          {
+            id: `unit-${unitNum}-topic-1-${uid()}`,
+            name: data.title,
+            unit: unitLabel,
+            unitNumber: unitNum,
+            subtopics: [data.title],
+            marks: "",
+            objectives: "",
+            difficulty: "Medium" as const,
+            importance: "Medium" as const,
+            status: "Not Started" as const,
+            priorityVerified: false,
+          },
+        ];
+      } else {
+        notes.push(
+          `No topics were identified under ${unitLabel}. Please click edit to verify and enter topics.`,
+        );
       }
     }
 
@@ -551,8 +700,7 @@ export function extractSyllabusUnits(
       title: data.title,
       topics,
       selectedForExam: index < examUnitLimit,
-      courseOutcomes: outcomes.length > 0 ? outcomes : undefined,
-      flaggedNotes: data.flaggedNotes.length > 0 ? data.flaggedNotes : undefined,
+      flaggedNotes: notes.length > 0 ? notes : undefined,
     };
   });
 }
@@ -887,7 +1035,8 @@ function generateCurriculumTopicsForSubject(
 }
 
 /**
- * Filter topics by user's selected exam units
+ * Filter topics by user's selected exam units and expand comma-separated topic lists
+ * into individual schedulable syllabus topics with exact wording.
  */
 export function buildTopicsFromSelectedUnits(
   units: ParsedUnit[],
@@ -899,17 +1048,41 @@ export function buildTopicsFromSelectedUnits(
   return units
     .filter((u) => targetNumbers.includes(u.unitNumber))
     .flatMap((u) =>
-      u.topics.map((t) => ({
-        id: t.id,
-        name: t.name,
-        difficulty: t.difficulty,
-        importance: t.importance,
-        status: t.status,
-        unit: u.unitLabel,
-        unitNumber: u.unitNumber,
-        subtopics: t.subtopics,
-        courseOutcomes: u.courseOutcomes,
-      })),
+      u.topics.flatMap((t) => {
+        const verified = t.priorityVerified ?? Boolean(t.marks?.trim());
+        const isCommaSeparatedTopicList =
+          t.subtopics &&
+          t.subtopics.length > 1 &&
+          normalize(t.subtopics[0] ?? "") === normalize(t.name);
+
+        if (isCommaSeparatedTopicList) {
+          return t.subtopics.map((item, idx) => ({
+            id: idx === 0 ? t.id : `${t.id}-sub-${idx + 1}`,
+            name: item,
+            difficulty: t.difficulty,
+            importance: t.importance,
+            status: t.status,
+            unit: u.unitLabel,
+            unitNumber: u.unitNumber,
+            subtopics: [item],
+            priorityVerified: verified,
+          }));
+        }
+
+        return [
+          {
+            id: t.id,
+            name: t.name,
+            difficulty: t.difficulty,
+            importance: t.importance,
+            status: t.status,
+            unit: u.unitLabel,
+            unitNumber: u.unitNumber,
+            subtopics: t.subtopics,
+            priorityVerified: verified,
+          },
+        ];
+      }),
     );
 }
 
@@ -920,14 +1093,15 @@ export function paperYears(text: string) {
 }
 
 export function topicEvidence(topic: SyllabusTopic, papers: Paper[]) {
-  const key = normalize(topic.name);
-  return papers.filter(
-    (p) =>
-      p.review === "verified" &&
-      p.text.trim() &&
-      key &&
-      ` ${normalize(p.text)} `.includes(` ${key} `),
-  );
+  const keys = [
+    normalize(topic.name),
+    ...(topic.subtopics ?? []).map((s) => normalize(s)).filter((k) => k.length > 3),
+  ].filter(Boolean);
+  return papers.filter((p) => {
+    if (p.review !== "verified" || !p.text.trim() || !keys.length) return false;
+    const hay = ` ${normalize(p.text)} `;
+    return keys.some((k) => hay.includes(` ${k} `));
+  });
 }
 
 export function intelligenceRanking(
@@ -953,17 +1127,23 @@ export function intelligenceRanking(
             total += v.total;
           }
       }
-      const base = topicPriority(topic, exam, today);
+      const base = topicPriority(topic, exam, today, analyzed);
       const bonus = total && correct / total < 0.5 ? 6 : total && correct / total < 0.8 ? 3 : 0;
-      const score = base.score + bonus + Math.min(6, evidence.length * 2);
+      const score = base.score + bonus;
       const level: PriorityLevel = score >= 22 ? "High" : score >= 14 ? "Medium" : "Low";
+      const priorityVerified =
+        evidence.length > 0 ||
+        Boolean(topic.marks?.trim()) ||
+        total > 0 ||
+        topic.priorityVerified === true;
       return {
-        topic,
+        topic: { ...topic, priorityVerified },
         evidence,
         score,
         level,
         correct,
         total,
+        priorityVerified,
         provisional: analyzed.length < 3,
         reasons: [
           ...base.reasons,
@@ -971,10 +1151,8 @@ export function intelligenceRanking(
             ? [`Quiz: ${correct}/${total} correct (+${bonus})`]
             : ["No saved quiz evidence"]),
           ...(evidence.length
-            ? [
-                `Exact topic wording found in ${evidence.length}/${analyzed.length} reviewed papers (+${Math.min(6, evidence.length * 2)})`,
-              ]
-            : ["No verified topic appearance; syllabus-based recommendation"]),
+            ? [`Exact topic wording found in ${evidence.length}/${analyzed.length} reviewed papers`]
+            : ["Priority not verified by past papers; scheduled from syllabus structure"]),
         ],
       };
     })
@@ -998,6 +1176,10 @@ export interface StrategyDay {
     minutes: number;
     score: number;
     priority: PriorityLevel;
+    unit?: string | undefined;
+    topicName?: string | undefined;
+    subtopics?: string[] | undefined;
+    priorityVerified?: boolean | undefined;
   }[];
 }
 
@@ -1034,6 +1216,11 @@ export function preparationStrategy(
   let index = 0;
   for (const r of ranking) {
     let remaining = estimateMinutes(r.topic) + 15;
+    const unitPrefix = r.topic.unit && r.topic.unit !== "Unassigned" ? `${r.topic.unit}: ` : "";
+    const distinctSubs = (r.topic.subtopics ?? []).filter(
+      (s) => s.trim() && normalize(s) !== normalize(r.topic.name),
+    );
+    const subSuffix = distinctSubs.length > 0 ? ` — ${distinctSubs.join(", ")}` : "";
     while (remaining > 0 && index < days.length) {
       const day = days[index];
       if (!day) break;
@@ -1049,16 +1236,21 @@ export function preparationStrategy(
           minutes: 10,
           score: 0,
           priority: "Low",
+          priorityVerified: true,
         });
         day.used += 10;
       }
       const minutes = Math.min(50, free, remaining);
       day.sessions.push({
         topicId: r.topic.id,
-        title: `${remaining <= 15 ? "Quick recall" : "Study"}: ${r.topic.name}`,
+        title: `${remaining <= 15 ? "Quick recall" : "Study"}: ${unitPrefix}${r.topic.name}${subSuffix}`,
         minutes,
         score: r.score,
         priority: r.level,
+        unit: r.topic.unit !== "Unassigned" ? r.topic.unit : undefined,
+        topicName: r.topic.name,
+        subtopics: r.topic.subtopics,
+        priorityVerified: r.priorityVerified,
       });
       day.used += minutes;
       remaining -= minutes;
@@ -1086,6 +1278,10 @@ export function appendStrategy(
       score: s.score,
       kind: "learn" as const,
       done: false,
+      unit: s.unit,
+      topicName: s.topicName,
+      subtopics: s.subtopics,
+      priorityVerified: s.priorityVerified,
     })),
   );
   return {

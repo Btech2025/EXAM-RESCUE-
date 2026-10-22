@@ -256,7 +256,7 @@ export const actions = {
   regenerate() {
     let warn = 0;
     set((s) => {
-      const plan = generatePlan(s.exams, s.plan, todayISO());
+      const plan = generatePlan(s.exams, s.plan, todayISO(), s.intelligence?.papers);
       warn = plan.unscheduled.length;
       return { ...s, plan };
     });
@@ -266,7 +266,7 @@ export const actions = {
     let res = { moved: 0, overflow: 0 };
     set((s) => {
       if (!s.plan) {
-        const plan = generatePlan(s.exams, null, todayISO());
+        const plan = generatePlan(s.exams, null, todayISO(), s.intelligence?.papers);
         res = { moved: plan.tasks.length, overflow: plan.unscheduled.length };
         return { ...s, plan };
       }
@@ -288,9 +288,11 @@ export const actions = {
   setUserStudyData(exams: Exam[], name?: string) {
     set((s) => {
       const today = todayISO();
-      const plan = generatePlan(exams, null, today);
+      const verifiedPapers = s.intelligence?.papers?.filter((p) => p.review === "verified") ?? [];
+      const plan = generatePlan(exams, null, today, verifiedPapers);
+      const { intelligence: _staleIntelligence, ...rest } = s;
       return {
-        ...s,
+        ...rest,
         exams,
         plan,
         settings: { ...s.settings, name: name || s.settings.name },
