@@ -1,6 +1,6 @@
 import * as pdfjs from "pdfjs-dist";
 import pdfjsWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
-import Tesseract from "tesseract.js";
+
 
 // Configure worker with local Vite asset URL and reliable CDN fallback
 try {
@@ -171,7 +171,7 @@ export async function readPdf(file: File, onProgress?: (status: string) => void)
       onProgress?.(
         `Scanned document detected. Running automatic OCR scan on page 1 of ${doc.numPages}...`,
       );
-
+      const { default: Tesseract } = await import("tesseract.js");
       const ocrPages: string[] = [];
 
       for (let pageNum = 1; pageNum <= doc.numPages; pageNum++) {
